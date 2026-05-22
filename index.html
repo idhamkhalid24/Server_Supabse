@@ -3252,7 +3252,7 @@ ${lockedByGlobal ? 'Hanya user ini yang dibuka dari closing global. Bonus closin
     lines.push(receiptLine(width));
     lines.push(receiptCleanLine(s.productLabel, 'Produk', 12) + ' : ' + receiptCleanLine(tx.note || 'Transaksi', 'Transaksi', 26));
     lines.push(receiptPadLine(receiptCleanLine(s.totalLabel, 'Total', 12), 'Rp ' + formatRupiah(tx.amount || 0), width));
-    lines.push(receiptPadLine('Pembayaran', getTransactionPaymentLabel(tx), width));
+    lines.push(receiptPadLine('Bayar', getTransactionPaymentLabel(tx), width));
     lines.push(receiptLine(width));
     String(s.footerText || '').split(/\n/).filter(Boolean).forEach(x => lines.push(receiptCleanLine(x, '', width)));
     lines.push('');
@@ -7115,6 +7115,7 @@ Masukkan PIN admin:`);
     const adminMenuCards = isAdmin() ? [
       ['attendance','Performa Absen Staff', 'Rata-rata jam absen bulanan staff', 'fa-user-clock'],
       ['manual_bonus','Tambah Bonus Manual', 'Tambah bonus ke staff/harian pilihan', 'fa-hand-holding-dollar'],
+      ['receipt_text','Setting Tulisan Struk', 'Ubah nama toko, label, footer, dan jarak sobek', 'fa-receipt'],
       ['header_guide_note','Catatan Panduan Header', 'Ubah catatan saat panduan header di-hide', 'fa-pen-to-square'],
       ['daily_employee','Kontrol Bonus Khusus User', 'Atur bonus transaksi per user langsung', 'fa-user-tag'],
       ['user_management','Manajemen User', 'Tambah, edit, nonaktifkan user', 'fa-users-gear'],
