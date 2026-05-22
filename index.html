@@ -3278,7 +3278,8 @@ ${lockedByGlobal ? 'Hanya user ini yang dibuka dari closing global. Bonus closin
     const bridges = [window.Android, window.AndroidPrinter, window.AndroidPrinterBridge].filter(Boolean);
     for (const bridge of bridges) {
       if (typeof bridge.printReceipt === 'function') {
-        bridge.printReceipt(text);
+        const ok = bridge.printReceipt(text);
+        if (ok === false) showToast('Izinkan Nearby devices/Bluetooth, lalu struk akan dicetak otomatis.', false);
         return;
       }
     }
