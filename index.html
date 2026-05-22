@@ -3238,25 +3238,44 @@ ${lockedByGlobal ? 'Hanya user ini yang dibuka dari closing global. Bonus closin
   function receiptLine(width = 40) { return '-'.repeat(width); }
   function receiptDateTime(ms) {
     const d = ms ? new Date(ms) : nowDate();
-    try { return d.toLocaleString('id-ID', { timeZone: 'Asia/Jakarta', day:'2-digit', month:'2-digit', year:'numeric', hour:'2-digit', minute:'2-digit' }).replace(',', ''); } catch (_) { return String(d); }
+    try {
+      return new Intl.DateTimeFormat('en-GB', {
+        timeZone: 'Asia/Jakarta',
+        day: '2-digit', month: '2-digit', year: 'numeric',
+        hour: '2-digit', minute: '2-digit', hourCycle: 'h23'
+      }).format(d).replace(',', '');
+    } catch (_) {
+      const pad = (n) => String(n).padStart(2, '0');
+      return `${pad(d.getDate())}/${pad(d.getMonth() + 1)}/${d.getFullYear()} ${pad(d.getHours())}:${pad(d.getMinutes())}`;
+    }
+  }
+  function receiptValueLine(label = '', value = '') {
+    const cleanLabel = receiptCleanLine(label || '-', '-', 10).slice(0, 7).padEnd(7, ' ');
+    return `${cleanLabel} : ${String(value ?? '').trim()}`;
   }
   function buildTransactionReceiptText(tx = {}) {
     const s = getReceiptTextSettingsSafe();
-    const width = 40;
+    const width = 32;
     const lines = [];
-    if (s.storeName) lines.push(receiptCleanLine(s.storeName, 'ROCKY HIJAB', width));
-    String(s.storeSubtext || '').split(/\n/).filter(Boolean).forEach(x => lines.push(receiptCleanLine(x, '', width)));
+    const storeName = receiptCleanLine(s.storeName, 'ROCKY HIJAB', width);
+    if (storeName) lines.push(storeName);
+    String(s.storeSubtext || '').split(/
+?
+/).map(x => receiptCleanLine(x, '', width)).filter(Boolean).forEach(x => lines.push(x));
     lines.push(receiptLine(width));
-    lines.push(receiptPadLine(receiptCleanLine(s.dateLabel, 'Tanggal', 12), receiptDateTime(getRecordTimeMs(tx)), width));
-    lines.push(receiptPadLine(receiptCleanLine(s.cashierLabel, 'Kasir', 12), receiptCleanLine(tx.name || tx.user || currentUser?.name || '-', '-', 22), width));
+    lines.push(receiptValueLine(s.dateLabel || 'Tanggal', receiptDateTime(getRecordTimeMs(tx))));
+    lines.push(receiptValueLine(s.cashierLabel || 'Kasir', receiptCleanLine(tx.name || tx.user || currentUser?.name || '-', '-', 22)));
+    lines.push(receiptValueLine(s.productLabel || 'Produk', receiptCleanLine(tx.note || 'Transaksi', 'Transaksi', 22)));
+    lines.push(receiptValueLine('Bayar', getTransactionPaymentLabel(tx)));
+    lines.push(receiptValueLine(s.totalLabel || 'Total', 'Rp ' + formatRupiah(tx.amount || 0)));
     lines.push(receiptLine(width));
-    lines.push(receiptCleanLine(s.productLabel, 'Produk', 12) + ' : ' + receiptCleanLine(tx.note || 'Transaksi', 'Transaksi', 26));
-    lines.push(receiptPadLine(receiptCleanLine(s.totalLabel, 'Total', 12), 'Rp ' + formatRupiah(tx.amount || 0), width));
-    lines.push(receiptPadLine('Bayar', getTransactionPaymentLabel(tx), width));
-    lines.push(receiptLine(width));
-    String(s.footerText || '').split(/\n/).filter(Boolean).forEach(x => lines.push(receiptCleanLine(x, '', width)));
+    String(s.footerText || 'Terima kasih').split(/
+?
+/).map(x => receiptCleanLine(x, '', width)).filter(Boolean).forEach(x => lines.push(x));
     lines.push('');
-    return lines.join('\n') + '\n'.repeat(Math.max(1, Number(s.bottomFeedLines || 4)));
+    return lines.join('
+') + '
+'.repeat(Math.max(1, Math.min(20, Number(s.bottomFeedLines || 4))));
   }
   function openReceiptPreview(text, title = 'Struk Transaksi') {
     receiptPreviewText = String(text || '');
@@ -4224,26 +4243,7 @@ ${lockedByGlobal ? 'Hanya user ini yang dibuka dari closing global. Bonus closin
     return l + ' '.repeat(space) + r;
   }
   function buildRockyReceiptText(t = {}) {
-    const s = getReceiptTextSettingsSafe();
-    const width = 32;
-    const when = new Date(getRecordTimeMs(t) || Date.now());
-    const date = `${formatDateLabel(getTransactionDateKey(t) || toDateKey(when))} ${dateToTimeInput(when)}`;
-    const lines = [];
-    lines.push(rockyReceiptCenter(s.storeName || 'ROCKY HIJAB', width));
-    String(s.storeSubtext || '').split(/\r?\n/).filter(Boolean).forEach(x => lines.push(rockyReceiptCenter(x, width)));
-    lines.push(rockyReceiptLine('-', width));
-    lines.push(rockyReceiptCenter(s.dailyTitle || 'STRUK TRANSAKSI', width));
-    lines.push(rockyReceiptLine('-', width));
-    lines.push(rockyReceiptPair((s.dateLabel || 'Tanggal') + ':', date, width));
-    lines.push(rockyReceiptPair((s.cashierLabel || 'Kasir') + ':', t.name || t.user || currentUser?.name || '-', width));
-    lines.push(rockyReceiptPair('Bayar:', getTransactionPaymentLabel(t), width));
-    lines.push(rockyReceiptLine('-', width));
-    lines.push(String(t.note || 'Transaksi').slice(0, width));
-    lines.push(rockyReceiptPair((s.totalLabel || 'Total') + ':', `Rp ${formatRupiah(t.amount || 0)}`, width));
-    lines.push(rockyReceiptLine('-', width));
-    String(s.footerText || 'Terima kasih').split(/\r?\n/).filter(Boolean).forEach(x => lines.push(rockyReceiptCenter(x, width)));
-    lines.push(...Array(Math.max(1, Math.min(12, Number(s.bottomFeedLines || 4)))).fill(''));
-    return lines.join('\n');
+    return buildTransactionReceiptText(t);
   }
 
 
