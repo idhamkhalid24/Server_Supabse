@@ -473,6 +473,7 @@
   try { await enableIndexedDbPersistence(db); } catch (e) { console.log('Offline persistence skipped:', e.code || e.message); }
 
   let currentUser = null, currentPos = null, currentPage = 'login', historyFilter = 'daily', reportFilter = 'daily', reportMonthKey = '', selectedUserFilter = 'all';
+  let appPageHistoryStack = [], appBackNavigating = false;
   let selectedRestoreProFile = null;
   let cachedTransactions = [], cachedAttendance = [], cachedUsers = [], cachedAuditLogs = [], cachedClosings = [], cachedManualBonuses = [];
   let adminNotifBootstrapped = false;
@@ -2467,6 +2468,8 @@ ${lockedByGlobal ? 'Hanya user ini yang dibuka dari closing global. Bonus closin
     localStorage.removeItem(PAGE_KEY);
     currentUser = null;
     currentPos = null;
+    appPageHistoryStack = [];
+    appBackNavigating = false;
     adminNotifBootstrapped = false;
     adminNotifSeenIds = new Set();
     if (logoutUsername) clearAttendanceCache(logoutUsername);
@@ -3335,7 +3338,8 @@ ${lockedByGlobal ? 'Hanya user ini yang dibuka dari closing global. Bonus closin
     const modal = $('transaction-payment-modal');
     const box = $('transaction-payment-summary');
     if (box) {
-      box.innerHTML = `<p class="label-xs" style="margin-bottom:6px">Konfirmasi transaksi</p><p style="font-family:var(--num-font);font-size:24px;font-weight:800;color:var(--accent);line-height:1">Rp ${formatRupiah(pendingTransactionPaymentDraft.amount || 0)}</p><p style="font-size:12px;color:var(--text);font-weight:700;margin-top:8px;white-space:pre-wrap;word-break:break-word">${escapeHtml(pendingTransactionPaymentDraft.note || 'Transaksi')}</p><p style="font-size:11px;color:var(--text-soft);margin-top:8px">Transaksi belum dikirim ke Supabase. Pilih salah satu metode untuk menyimpan sebagai sukses.</p>`;
+      const isEditPayment = !!pendingTransactionPaymentDraft.isEdit;
+      box.innerHTML = `<p class="label-xs" style="margin-bottom:6px">${isEditPayment ? 'Konfirmasi edit transaksi' : 'Konfirmasi transaksi'}</p><p style="font-family:var(--num-font);font-size:24px;font-weight:800;color:var(--accent);line-height:1">Rp ${formatRupiah(pendingTransactionPaymentDraft.amount || 0)}</p><p style="font-size:12px;color:var(--text);font-weight:700;margin-top:8px;white-space:pre-wrap;word-break:break-word">${escapeHtml(pendingTransactionPaymentDraft.note || 'Transaksi')}</p><p style="font-size:11px;color:var(--text-soft);margin-top:8px">${isEditPayment ? 'Pilih metode pembayaran baru. Edit akan disimpan dengan field Cash atau QRIS / Transfer agar selaras dengan aplikasi lain.' : 'Transaksi belum dikirim ke Supabase. Pilih salah satu metode untuk menyimpan sebagai sukses.'}</p>`;
     }
     if (modal) { modal.classList.add('show'); modal.style.display = 'flex'; }
   }
@@ -3382,7 +3386,7 @@ ${lockedByGlobal ? 'Hanya user ini yang dibuka dari closing global. Bonus closin
       amountInput.value = amount ? formatRupiah(amount) : '';
     }
     const statusBox = $('modal-pos-status');
-    if (statusBox) statusBox.innerHTML = `<div style="display:flex;align-items:center;gap:9px;padding:11px 13px;background:var(--amber-dim);border:1px solid rgba(255,196,107,0.2);border-radius:11px"><i class="fas fa-pen-to-square" style="color:var(--amber);font-size:13px"></i><span style="font-size:12.5px;color:var(--amber);font-weight:600">Mode edit: ubah catatan dan nominal transaksi.</span></div>`;
+    if (statusBox) statusBox.innerHTML = `<div style="display:flex;align-items:center;gap:9px;padding:11px 13px;background:var(--amber-dim);border:1px solid rgba(255,196,107,0.2);border-radius:11px"><i class="fas fa-pen-to-square" style="color:var(--amber);font-size:13px"></i><span style="font-size:12.5px;color:var(--amber);font-weight:600">Mode edit: ubah catatan, nominal, lalu pilih Cash atau QRIS / Transfer.</span></div>`;
     if (modal) { modal.classList.add('show'); modal.style.display = 'flex'; }
     setTimeout(() => noteInput?.focus?.(), 100);
   }
@@ -3390,41 +3394,21 @@ ${lockedByGlobal ? 'Hanya user ini yang dibuka dari closing global. Bonus closin
   async function saveEditedTransaction() {
     if (isBusy) return showToast('Tunggu proses selesai', true);
     const id = transactionEditTargetId;
-    const trx = cachedTransactions.find(t => t.id === id);
+    const trx = cachedTransactions.find(t => String(t.id) === String(id));
     if (!trx) return showToast('Transaksi tidak ditemukan!', true);
     if (trx.user !== currentUser.username && !isAdmin()) return showToast('Tidak bisa edit transaksi orang lain!', true);
     const amount = parseInt($('modal-pos-amount')?.getAttribute('data-numeric') || '0', 10);
     const note = String($('modal-pos-note')?.value || '').trim() || 'Transaksi';
     if (!amount || amount <= 0) return showToast('Nominal tidak valid!', true);
-    const pin = await askPin(`Edit transaksi Rp ${formatRupiah(trx.amount)} menjadi Rp ${formatRupiah(amount)}?\nMasukkan PIN admin:`);
-    if (!pin) return;
-    if (!(await requireCurrentAdminPin(pin))) return;
-    setLoading(true);
-    try {
-      await setDoc(doc(db, 'transactions', id), {
-        amount,
-        note,
-        edited: true,
-        editedAt: serverTimestamp(),
-        editedAtMs: Date.now(),
-        editedBy: currentUser.username,
-        editedByName: currentUser.name
-      }, { merge: true });
-      await logAudit('transaction_edit', {
-        id,
-        user: trx.user,
-        beforeAmount: Number(trx.amount || 0),
-        afterAmount: amount,
-        beforeNote: trx.note || 'Transaksi',
-        afterNote: note
-      });
-      showToast('✓ Transaksi berhasil diedit');
-      closeTransactionModal();
-    } catch (e) {
-      console.error(e);
-      showToast('Gagal edit transaksi', true);
-    }
-    setLoading(false);
+    openTransactionPaymentModal({
+      id,
+      isEdit: true,
+      amount,
+      note,
+      oldAmount: Number(trx.amount || 0),
+      oldNote: trx.note || 'Transaksi',
+      printAfterSave: false
+    });
   }
 
   function prepareTransactionPaymentFromModal(printAfterSave = false) {
@@ -3465,6 +3449,44 @@ ${lockedByGlobal ? 'Hanya user ini yang dibuka dari closing global. Bonus closin
     const paymentInfo = getTransactionPaymentInfo(payment);
     setLoading(true);
     try {
+      if (draft.isEdit && draft.id) {
+        const id = String(draft.id);
+        const trx = cachedTransactions.find(t => String(t.id) === id);
+        if (!trx) throw new Error('Transaksi tidak ditemukan');
+        const patch = {
+          amount,
+          note,
+          paymentMethod: paymentInfo.method,
+          paymentLabel: paymentInfo.label,
+          paymentStatus: 'success',
+          paymentCashOutType: paymentInfo.method === 'qris_transfer' ? 'qris' : '',
+          isNonCashPayment: paymentInfo.method === 'qris_transfer',
+          paymentConfirmed: true,
+          paymentConfirmedAtMs: Date.now(),
+          edited: true,
+          editedAt: serverTimestamp(),
+          editedAtMs: Date.now(),
+          editedBy: currentUser.username,
+          editedByName: currentUser.name
+        };
+        await setDoc(doc(db, 'transactions', id), patch, { merge: true });
+        await logAudit('transaction_edit', {
+          id,
+          user: trx.user,
+          beforeAmount: Number(trx.amount || draft.oldAmount || 0),
+          afterAmount: amount,
+          beforeNote: trx.note || draft.oldNote || 'Transaksi',
+          afterNote: note,
+          paymentMethod: paymentInfo.method,
+          paymentLabel: paymentInfo.label
+        });
+        showToast(`✓ Edit transaksi disimpan · ${paymentInfo.label}`);
+        pendingTransactionPaymentDraft = null;
+        closeTransactionPaymentModal(true);
+        closeTransactionModal();
+        setLoading(false);
+        return;
+      }
       const latest = await fetchLatestBonusBeforeTransaction(currentUser.username);
       const freshUser = latest.user || currentUser;
       const userBonus = latest.snapshot || getUserBonusSnapshot(freshUser);
@@ -7561,8 +7583,24 @@ Masukkan PIN admin:`);
 
   function appBackToPreviousPage() {
     if (!currentUser || currentPage === 'login') return false;
-    if (currentPage === 'adminLogs') { router.navigate('settings'); return true; }
-    if (currentPage !== 'home') { router.navigate('home'); return true; }
+    const openModal = document.querySelector('.modal-wrap.show, .modal.show');
+    if (openModal) {
+      openModal.classList.remove('show');
+      openModal.style.display = 'none';
+      return true;
+    }
+    let prev = '';
+    while (appPageHistoryStack.length) {
+      prev = appPageHistoryStack.pop();
+      if (prev && prev !== currentPage) break;
+      prev = '';
+    }
+    if (!prev && currentPage === 'adminLogs') prev = 'settings';
+    if (prev) {
+      appBackNavigating = true;
+      router.navigate(prev).finally(() => { appBackNavigating = false; });
+      return true;
+    }
     return false;
   }
 
@@ -7591,6 +7629,11 @@ Masukkan PIN admin:`);
 
   const router = {
     navigate: async (page) => {
+      if (!appBackNavigating && currentPage && currentPage !== page && currentPage !== 'login') {
+        const last = appPageHistoryStack[appPageHistoryStack.length - 1];
+        if (last !== currentPage) appPageHistoryStack.push(currentPage);
+        if (appPageHistoryStack.length > 20) appPageHistoryStack = appPageHistoryStack.slice(-20);
+      }
       currentPage = page;
       const content = $('page-content');
       const nav = $('bottom-nav');
