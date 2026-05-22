@@ -91,9 +91,9 @@
   <nav id="bottom-nav" style="display:none">
     <button onclick="router.navigate('home')" id="nav-home" class="nav-item"><i class="fas fa-house"></i><span id="nav-home-label">Beranda</span></button>
     <button onclick="router.navigate('history')" id="nav-history" class="nav-item"><i class="fas fa-receipt"></i><span id="nav-history-label">Riwayat</span></button>
+    <button onclick="router.navigate('report')" id="nav-report" class="nav-item"><i class="fas fa-chart-line"></i><span id="nav-report-label">Laporan</span></button>
     <button onclick="router.navigate('attendance')" id="nav-attendance" class="nav-item"><i class="fas fa-user-clock"></i><span id="nav-attendance-label">Absen</span></button>
     <button onclick="router.navigate('closing')" id="nav-closing" class="nav-item"><i class="fas fa-lock"></i><span id="nav-closing-label">Closing</span></button>
-    <button onclick="router.navigate('report')" id="nav-report" class="nav-item"><i class="fas fa-chart-line"></i><span id="nav-report-label">Laporan</span></button>
     <button onclick="router.navigate('settings')" id="nav-settings" class="nav-item"><i class="fas fa-gear"></i><span id="nav-settings-label">Setelan</span></button>
   </nav>
 
@@ -3526,7 +3526,7 @@ ${lockedByGlobal ? 'Hanya user ini yang dibuka dari closing global. Bonus closin
               </div>
               <div style="display:flex;align-items:center;justify-content:space-between;gap:10px;margin-top:4px">
                 <span class="trx-time" style="font-size:9.5px">${dateToTimeInput(new Date(getRecordTimeMs(t) || Date.now()))} · ${getTransactionPaymentLabel(t)}</span>
-                <button onclick="deleteTransaction('${t.id}')" class="btn btn-danger" style="padding:5px 8px;font-size:10px;border-radius:9px"><i class="fas fa-trash"></i></button>
+                <span style="display:flex;gap:6px;align-items:center"><button onclick="printTransactionReceipt('${t.id}')" class="btn btn-glass" style="padding:5px 8px;font-size:10px;border-radius:9px"><i class="fas fa-print"></i></button><button onclick="deleteTransaction('${t.id}')" class="btn btn-danger" style="padding:5px 8px;font-size:10px;border-radius:9px"><i class="fas fa-trash"></i></button></span>
               </div>
             </div>
           </div>`).join('') : `<div style="padding:18px 10px;text-align:center;border:1px dashed var(--border);border-radius:14px;color:var(--text-soft);font-size:12px">Belum ada transaksi hari ini.</div>`}
@@ -3563,7 +3563,7 @@ ${lockedByGlobal ? 'Hanya user ini yang dibuka dari closing global. Bonus closin
                 </div>
                 <div style="text-align:right;flex-shrink:0">
                   <p class="trx-amount" style="font-size:15px;white-space:nowrap;color:var(--green)">Rp ${formatRupiah(t.amount)}</p>
-                  <button onclick="deleteTransaction('${t.id}')" class="btn btn-danger" style="margin-top:7px;padding:5px 8px;font-size:10px;border-radius:9px"><i class="fas fa-trash"></i></button>
+                  <div style="display:flex;gap:6px;justify-content:flex-end;margin-top:7px"><button onclick="printTransactionReceipt('${t.id}')" class="btn btn-glass" style="padding:5px 8px;font-size:10px;border-radius:9px"><i class="fas fa-print"></i></button><button onclick="deleteTransaction('${t.id}')" class="btn btn-danger" style="padding:5px 8px;font-size:10px;border-radius:9px"><i class="fas fa-trash"></i></button></div>
                 </div>
               </div>
             </div>
@@ -3989,6 +3989,68 @@ ${lockedByGlobal ? 'Hanya user ini yang dibuka dari closing global. Bonus closin
   }
 
 
+  function rockyReceiptLine(char = '-', count = 32) { return String(char || '-').repeat(count); }
+  function rockyReceiptCenter(text = '', width = 32) {
+    const s = String(text || '').trim();
+    if (s.length >= width) return s;
+    const left = Math.floor((width - s.length) / 2);
+    return ' '.repeat(left) + s;
+  }
+  function rockyReceiptPair(label = '', value = '', width = 32) {
+    const l = String(label || '').trim();
+    const r = String(value || '').trim();
+    const space = Math.max(1, width - l.length - r.length);
+    return l + ' '.repeat(space) + r;
+  }
+  function buildRockyReceiptText(t = {}) {
+    const s = getReceiptTextSettingsSafe();
+    const width = 32;
+    const when = new Date(getRecordTimeMs(t) || Date.now());
+    const date = `${formatDateLabel(getTransactionDateKey(t) || toDateKey(when))} ${dateToTimeInput(when)}`;
+    const lines = [];
+    lines.push(rockyReceiptCenter(s.storeName || 'ROCKY HIJAB', width));
+    String(s.storeSubtext || '').split(/\r?\n/).filter(Boolean).forEach(x => lines.push(rockyReceiptCenter(x, width)));
+    lines.push(rockyReceiptLine('-', width));
+    lines.push(rockyReceiptCenter(s.dailyTitle || 'STRUK TRANSAKSI', width));
+    lines.push(rockyReceiptLine('-', width));
+    lines.push(rockyReceiptPair((s.dateLabel || 'Tanggal') + ':', date, width));
+    lines.push(rockyReceiptPair((s.cashierLabel || 'Kasir') + ':', t.name || t.user || currentUser?.name || '-', width));
+    lines.push(rockyReceiptPair('Bayar:', getTransactionPaymentLabel(t), width));
+    lines.push(rockyReceiptLine('-', width));
+    lines.push(String(t.note || 'Transaksi').slice(0, width));
+    lines.push(rockyReceiptPair((s.totalLabel || 'Total') + ':', `Rp ${formatRupiah(t.amount || 0)}`, width));
+    lines.push(rockyReceiptLine('-', width));
+    String(s.footerText || 'Terima kasih').split(/\r?\n/).filter(Boolean).forEach(x => lines.push(rockyReceiptCenter(x, width)));
+    lines.push(...Array(Math.max(1, Math.min(12, Number(s.bottomFeedLines || 4)))).fill(''));
+    return lines.join('\n');
+  }
+
+  function printTransactionReceipt(id) {
+    const t = (cachedTransactions || []).find(x => String(x.id || '') === String(id || ''));
+    if (!t) return showToast('Transaksi tidak ditemukan untuk cetak struk', true);
+    const text = buildRockyReceiptText(t);
+    try {
+      if (window.AndroidPrinter && typeof window.AndroidPrinter.printReceipt === 'function') {
+        const ok = window.AndroidPrinter.printReceipt(text);
+        if (ok) return showToast('✓ Struk dikirim ke printer');
+      }
+      if (window.AndroidPrinterBridge && typeof window.AndroidPrinterBridge.printReceipt === 'function') {
+        const ok = window.AndroidPrinterBridge.printReceipt(text);
+        if (ok) return showToast('✓ Struk dikirim ke printer');
+      }
+    } catch (e) {
+      console.warn('Printer native gagal:', e);
+    }
+    const w = window.open('', '_blank');
+    if (w) {
+      w.document.write(`<pre style="font-family:monospace;font-size:13px;white-space:pre-wrap">${escapeHtml(text)}</pre><script>window.print()<\/script>`);
+      w.document.close();
+    } else {
+      showToast('Printer belum tersedia / popup diblokir', true);
+    }
+  }
+
+
   async function renderHistory() {
     const list = $('history-list'); if (!list) return;
     const filtered = sortByCreatedDesc(getFilteredTransactions());
@@ -4034,7 +4096,10 @@ ${lockedByGlobal ? 'Hanya user ini yang dibuka dari closing global. Bonus closin
               <p class="trx-note">${escapeHtml(t.note || 'Transaksi')}</p>
               <p class="trx-time">${(() => { const ms = getRecordTimeMs(t); return ms ? dateToTimeInput(new Date(ms)) : formatDateLabel(getTransactionDateKey(t)); })()} · ${getTransactionPaymentLabel(t)}</p>
             </div>
-            <button onclick="deleteTransaction('${t.id}')" class="btn btn-danger" style="width:34px;height:34px;flex-shrink:0;border-radius:9px;padding:0;font-size:11px"><i class="fas fa-trash-can"></i></button>
+            <div style="display:flex;flex-direction:column;gap:6px;flex-shrink:0">
+              <button onclick="printTransactionReceipt('${t.id}')" class="btn btn-glass" style="width:34px;height:34px;border-radius:9px;padding:0;font-size:11px" title="Cetak Struk"><i class="fas fa-print"></i></button>
+              <button onclick="deleteTransaction('${t.id}')" class="btn btn-danger" style="width:34px;height:34px;border-radius:9px;padding:0;font-size:11px"><i class="fas fa-trash-can"></i></button>
+            </div>
           </div>
         `).join('') || `<div style="text-align:center;padding:56px 0;color:var(--text-ghost)"><i class="fas fa-inbox" style="font-size:30px;margin-bottom:10px;display:block;opacity:0.5"></i><p style="font-size:12.5px">Tidak ada transaksi</p></div>`}
       </div>
@@ -6788,6 +6853,50 @@ Masukkan PIN admin:`);
       <p style="font-size:11px;color:var(--text-soft);margin-top:10px">Hapus biasa hanya memindahkan data ke recycle bin. Gunakan filter untuk cari data tertentu, atau hapus/pulihkan semua hasil filter sekaligus.</p>`;
   }
 
+
+  function renderAdminProPageBody(key) {
+    if (key === 'attendance') return renderAdminAttendancePerformanceBody();
+    if (key === 'manual_bonus') return renderManualBonusCard();
+    if (key === 'receipt_text') return renderReceiptTextSettingsBody();
+    if (key === 'header_guide_note') return renderHeaderGuideNoteControlBody();
+    if (key === 'daily_employee') return renderDailyEmployeeControlBody();
+    if (key === 'user_management') return renderUserManagementBody(activeUsers().length);
+    if (key === 'backup_restore') return renderBackupRestoreBody();
+    if (key === 'deleted_data') {
+      const deletedTransactions = getDeletedTransactions();
+      const filteredDeletedTransactions = getFilteredDeletedTransactions();
+      const visibleDeletedTransactions = filteredDeletedTransactions.slice(0, recycleBinLimit);
+      const hasMoreDeleted = filteredDeletedTransactions.length > visibleDeletedTransactions.length;
+      return renderDeletedDataBody(filteredDeletedTransactions, visibleDeletedTransactions, hasMoreDeleted, deletedTransactions);
+    }
+    return '<div class="card" style="padding:16px;color:var(--text-soft)">Menu tidak ditemukan.</div>';
+  }
+
+  function openAdminProPage(key) {
+    if (!isAdmin()) return router.navigate('home');
+    const titles = {
+      attendance:'Performa Absen Staff', manual_bonus:'Tambah Bonus Manual', receipt_text:'Setting Tulisan Struk', header_guide_note:'Catatan Panduan Header', daily_employee:'Kontrol Bonus Khusus User', user_management:'Manajemen User', backup_restore:'Backup, Reset & Restore', deleted_data:'Data Terhapus'
+    };
+    currentPage = 'settings';
+    const content = $('page-content');
+    const nav = $('bottom-nav');
+    if (nav) nav.style.display = 'flex';
+    setActiveNav('settings');
+    content.innerHTML = `
+      <div class="page-pad">
+        <div style="padding:34px 0 14px;display:flex;align-items:center;gap:10px" class="page-in">
+          <button onclick="router.navigate('settings')" class="btn btn-glass" style="width:38px;height:38px;padding:0;border-radius:12px"><i class="fas fa-arrow-left"></i></button>
+          <div style="min-width:0;flex:1">
+            <p class="page-title">${escapeHtml(titles[key] || 'Admin Pro')}</p>
+            <p class="page-subtitle">Halaman terpisah supaya ringan dan tidak menumpuk.</p>
+          </div>
+        </div>
+        <div class="page-in s1" style="padding-bottom:96px">${renderAdminProPageBody(key)}</div>
+      </div>`;
+    if (key === 'backup_restore') updateRestoreProStatus();
+    if (key === 'deleted_data' && $('recycle-user-filter')) $('recycle-user-filter').value = recycleUserFilter;
+  }
+
   async function renderSettingsSummary() {
     const info = $('settings-summary');
     if (!info || !currentUser) return;
@@ -6803,57 +6912,26 @@ Masukkan PIN admin:`);
     const hasMoreDeleted = filteredDeletedTransactions.length > visibleDeletedTransactions.length;
     const adminAttendanceRows = isAdmin() ? activeUsers().map(u => ({ user: u, perf: getMonthlyAttendancePerformance(u.username) })) : [];
 
-    const openPanelCount = ADMIN_PANEL_KEYS.filter(k => isAdminSettingPanelOpen(k)).length;
-    const adminBlocks = (isAdmin() && adminMoreOpen) ? [
-      `<div class="card" style="padding:12px 14px;margin-top:12px;background:linear-gradient(145deg,var(--bg3),var(--bg2));border-color:rgba(91,143,255,.18)">
-        <div style="display:flex;align-items:center;justify-content:space-between;gap:10px">
-          <div style="min-width:0">
-            <div style="font-size:13px;font-weight:900;letter-spacing:-.01em">Admin Pro</div>
-            <div style="font-size:10.5px;color:var(--text-soft);margin-top:3px">Panel berat dibuka satu-satu agar ringan.</div>
-          </div>
-          <button onclick="closeAdminSettingPanels()" class="btn btn-glass" ${openPanelCount ? '' : 'disabled'} style="padding:9px 11px;font-size:11px;white-space:nowrap"><i class="fas fa-compress"></i> Tutup Semua</button>
-        </div>
-      </div>`,
-      renderAdminToggleSection('attendance', 'Performa Absen Staff', `<span class="status-pill status-ok">${getStaffBonusUsers().length}</span>`, renderAdminAttendancePerformanceBody, 'fa-user-clock', 'Rata-rata jam absen bulanan staff'),
-      renderAdminToggleSection('manual_bonus', 'Tambah Bonus Manual', `<span class="status-pill status-ok">Rp ${formatRupiah(getMonthlyManualBonus(null, toMonthKey(nowDate())))}</span>`, () => renderManualBonusCard(), 'fa-hand-holding-dollar', 'Tambah bonus ke staff/harian pilihan'),
-      renderAdminToggleSection('receipt_text', 'Setting Tulisan Struk', '<span class="status-pill status-ok">Admin</span>', renderReceiptTextSettingsBody, 'fa-receipt', 'Ubah nama toko, label, footer, dan jarak sobek'),
-      renderAdminToggleSection('header_guide_note', 'Catatan Panduan Header', '<span class="status-pill status-ok">Edit</span>', renderHeaderGuideNoteControlBody, 'fa-pen-to-square', 'Ubah catatan saat Panduan Icon Header di-hide'),
-      renderAdminToggleSection('daily_employee', 'Kontrol Bonus Khusus User', `<span class="status-pill status-ok">${activeUsers().filter(u => ['staff','harian'].includes(normalizeRole(u.role || 'staff'))).length}</span>`, renderDailyEmployeeControlBody, 'fa-user-tag', 'Atur bonus transaksi per user langsung'),
-      renderAdminToggleSection('user_management', 'Manajemen User', `<span class="status-pill status-ok">${userCount}</span>`, () => renderUserManagementBody(userCount), 'fa-users-gear', 'Tambah, edit, nonaktifkan user'),
-      renderAdminToggleSection('backup_restore', 'Backup, Reset & Restore', '<span class="status-pill status-warn">Backup</span>', renderBackupRestoreBody, 'fa-database', 'Backup, restore otomatis, normalisasi'),
-      renderAdminToggleSection('deleted_data', 'Data Terhapus', `<span class="status-pill status-warn">${deletedTransactions.length}</span>`, () => renderDeletedDataBody(filteredDeletedTransactions, visibleDeletedTransactions, hasMoreDeleted, deletedTransactions), 'fa-trash-can-arrow-up', 'Recycle bin transaksi'),
-      `<div class="card" style="padding:14px 16px;margin-top:12px">
-        <div style="display:flex;align-items:center;gap:12px">
-          <div style="width:40px;height:40px;border-radius:13px;background:var(--accent-dim);display:flex;align-items:center;justify-content:center;color:var(--accent);flex-shrink:0"><i class="fas fa-clock-rotate-left"></i></div>
-          <div style="min-width:0;flex:1">
-            <div style="font-size:13px;font-weight:800">Log Aktivitas Admin</div>
-            <div style="font-size:11px;color:var(--text-soft);margin-top:3px">${cachedAuditLogs.length} log tersimpan · halaman terpisah</div>
-          </div>
-          <button onclick="router.navigate('adminLogs')" class="btn btn-glass" style="padding:9px 11px;font-size:11.5px;white-space:nowrap">Buka</button>
-        </div>
-      </div>`,
-      `<div class="card" style="padding:14px 16px;margin-top:12px">
-        <div style="display:flex;justify-content:space-between;align-items:center;gap:10px;margin-bottom:10px">
-          <p class="label-xs" style="margin:0">User Nonaktif</p>
-          <span class="status-pill status-warn">${inactiveUsers.length} user</span>
-        </div>
-        <div style="display:flex;flex-direction:column;gap:8px;max-height:220px;overflow-y:auto">
-          ${visibleInactiveUsers.length ? visibleInactiveUsers.map(u => `<div style="display:flex;align-items:center;justify-content:space-between;gap:10px;padding:10px 12px;border:1px solid var(--border);border-radius:12px;background:var(--surface)"><div style="min-width:0;flex:1"><div style="font-size:12px;font-weight:700">${escapeHtml(u.name || u.username)} (@${escapeHtml(u.username || '-')})</div><div style="font-size:10px;color:var(--text-soft)">${escapeHtml(getRoleDisplayName(u.role || 'staff').toUpperCase())} · nonaktif</div></div><button onclick="restoreAdminUser('${escapeHtml(u.username || '')}')" class="btn btn-success" style="padding:8px 10px;font-size:10.5px;border-radius:11px;white-space:nowrap"><i class="fas fa-rotate-left"></i> Aktifkan</button></div>`).join('') : `<div style="font-size:12px;color:var(--text-soft)">Belum ada user nonaktif.</div>`}
-        </div>
-        ${hasMoreInactiveUsers ? `<button onclick="increaseInactiveUserLimit()" class="btn btn-glass" style="width:100%;margin-top:10px;padding:11px;font-size:12px">Muat ${Math.min(INACTIVE_USER_STEP, inactiveUsers.length - visibleInactiveUsers.length)} user nonaktif lagi</button>` : ''}
-      </div>`
-    ].join('') : '';
+    const adminMenuCards = isAdmin() ? [
+      ['attendance','Performa Absen Staff', 'Rata-rata jam absen bulanan staff', 'fa-user-clock'],
+      ['manual_bonus','Tambah Bonus Manual', 'Tambah bonus ke staff/harian pilihan', 'fa-hand-holding-dollar'],
+      ['receipt_text','Setting Tulisan Struk', 'Ubah nama toko, label, footer, dan jarak sobek', 'fa-receipt'],
+      ['header_guide_note','Catatan Panduan Header', 'Ubah catatan saat panduan header di-hide', 'fa-pen-to-square'],
+      ['daily_employee','Kontrol Bonus Khusus User', 'Atur bonus transaksi per user langsung', 'fa-user-tag'],
+      ['user_management','Manajemen User', 'Tambah, edit, nonaktifkan user', 'fa-users-gear'],
+      ['backup_restore','Backup, Reset & Restore', 'Backup, restore otomatis, normalisasi', 'fa-database'],
+      ['deleted_data','Data Terhapus', 'Recycle bin transaksi', 'fa-trash-can-arrow-up']
+    ].map(([key,title,sub,icon]) => `
+      <button onclick="openAdminProPage('${key}')" class="setting-row" style="margin-bottom:8px;border-radius:14px!important">
+        <div class="setting-ico" style="background:var(--accent-dim)"><i class="fas ${icon}" style="color:var(--accent)"></i></div>
+        <span class="setting-label">${escapeHtml(title)}<small style="display:block;font-size:10px;color:var(--text-soft);font-weight:650;margin-top:2px">${escapeHtml(sub)}</small></span>
+        <i class="fas fa-chevron-right setting-arrow"></i>
+      </button>`).join('') : '';
 
     info.innerHTML = `
-      <div style="display:flex;flex-direction:column;gap:8px">
-        <div style="display:flex;justify-content:space-between;font-size:12px"><span>Project</span><strong>${escapeHtml(firebaseConfig.projectId)}</strong></div>
-        <div style="display:flex;justify-content:space-between;font-size:12px"><span>Status Koneksi</span><strong>${navigator.onLine ? 'Online' : 'Offline'}</strong></div>
-        <div style="display:flex;justify-content:space-between;font-size:12px"><span>Role Aktif</span><strong>${getRoleLabel()}</strong></div>
-        <div style="display:flex;justify-content:space-between;font-size:12px"><span>Scope Data</span><strong>${escapeHtml(getUserDataScopeLabel())}</strong></div>
-        <div style="display:flex;justify-content:space-between;font-size:12px"><span>Transaksi Aktif</span><strong>${getVisibleTransactions().length}</strong></div>
-        <div style="display:flex;justify-content:space-between;font-size:12px"><span>Recycle Bin</span><strong>${deletedTransactions.length}</strong></div>
+      <div style="display:flex;flex-direction:column;gap:0">
+        ${adminMenuCards}
       </div>
-      ${adminBlocks}
     `;
     if (isAdmin() && $('recycle-user-filter')) $('recycle-user-filter').value = recycleUserFilter;
     updateRestoreProStatus();
@@ -7024,20 +7102,20 @@ Masukkan PIN admin:`);
       <div class="trx-card" style="align-items:flex-start">
         <div class="trx-icon" style="background:${isRecordDeleted(a) ? 'var(--red-dim)' : 'var(--green-dim)'};color:${isRecordDeleted(a) ? 'var(--red)' : 'var(--green)'}"><i class="fas fa-user-clock"></i></div>
         <div style="min-width:0;flex:1">
-          <div style="display:flex;align-items:center;justify-content:space-between;gap:8px">
-            <div style="min-width:0">
+          <div style="display:flex;align-items:flex-start;justify-content:space-between;gap:8px">
+            <div style="min-width:0;flex:1">
               <div style="font-size:13px;font-weight:850;white-space:nowrap;overflow:hidden;text-overflow:ellipsis">${escapeHtml(name)}</div>
               <div style="font-size:10.5px;color:var(--text-soft);margin-top:2px">@${escapeHtml(username)} · ${escapeHtml(formatDateLabel(dateKey))} · ${escapeHtml(timeLabel)} WIB</div>
+              <span class="status-pill ${deletedCls}" style="font-size:9px;padding:3px 7px;white-space:nowrap;margin-top:7px;display:inline-flex">${deletedText}</span>
             </div>
-            <span class="status-pill ${deletedCls}" style="font-size:9px;padding:3px 7px;white-space:nowrap">${deletedText}</span>
-          </div>
-          <div style="display:flex;gap:7px;margin-top:9px;flex-wrap:wrap">
-            ${isRecordDeleted(a) ? `
-              <button onclick="restoreAdminAttendance('${escapeHtml(a.id)}')" class="btn btn-glass" style="padding:8px 10px;font-size:11px"><i class="fas fa-rotate-left"></i> Pulihkan</button>
-            ` : `
-              <button onclick="openAdminAttendanceModal('${escapeHtml(a.id)}')" class="btn btn-glass" style="padding:8px 10px;font-size:11px"><i class="fas fa-pen"></i> Edit</button>
-              <button onclick="deleteAdminAttendance('${escapeHtml(a.id)}')" class="btn btn-danger" style="padding:8px 10px;font-size:11px"><i class="fas fa-trash"></i> Hapus</button>
-            `}
+            <div style="display:flex;gap:6px;flex-shrink:0;align-items:flex-start">
+              ${isRecordDeleted(a) ? `
+                <button onclick="restoreAdminAttendance('${escapeHtml(a.id)}')" class="btn btn-glass" style="width:34px;height:34px;padding:0;font-size:11px;border-radius:10px" title="Pulihkan"><i class="fas fa-rotate-left"></i></button>
+              ` : `
+                <button onclick="openAdminAttendanceModal('${escapeHtml(a.id)}')" class="btn btn-glass" style="width:34px;height:34px;padding:0;font-size:11px;border-radius:10px" title="Edit"><i class="fas fa-pen"></i></button>
+                <button onclick="deleteAdminAttendance('${escapeHtml(a.id)}')" class="btn btn-danger" style="width:34px;height:34px;padding:0;font-size:11px;border-radius:10px" title="Hapus"><i class="fas fa-trash"></i></button>
+              `}
+            </div>
           </div>
         </div>
       </div>`;
@@ -7245,7 +7323,7 @@ Masukkan PIN admin:`);
   function applyNavRoleLabels() {
     const adminMode = isAdmin();
     const labels = adminMode
-      ? { home:'Admin', history:'Semua', attendance:'Absen', closing:'Closing', report:'Global', settings:'User' }
+      ? { home:'Admin', history:'Riwayat', attendance:'Absen', closing:'Closing', report:'Laporan', settings:'User' }
       : { home:'Beranda', history:'Hari Ini', attendance:'Absen', closing:'Closing', report:'Laporan', settings:'Setelan' };
     if ($('nav-home-label')) $('nav-home-label').textContent = labels.home;
     if ($('nav-history-label')) $('nav-history-label').textContent = labels.history;
@@ -7588,54 +7666,13 @@ Masukkan PIN admin:`);
         nav.style.display = 'flex'; setActiveNav(page);
         content.innerHTML = `
           <div class="page-pad">
-            <div style="padding:50px 0 18px;display:flex;justify-content:space-between;align-items:center" class="page-in">
-              <p class="page-title">${isAdmin() ? 'User & Sistem' : 'Sistem'}</p>
-              <div class="header-actions">${memberIcon}${refreshIcon}<button class="theme-toggle theme-btn" onclick="toggleTheme()">${themeIcon}</button></div>
-            </div>
-            <div style="text-align:center;margin-bottom:24px" class="page-in">
-              <div style="width:76px;height:76px;border-radius:50%;background:linear-gradient(135deg, var(--accent), #818cf8);display:flex;align-items:center;justify-content:center;font-size:28px;color:white;margin:0 auto">${escapeHtml((currentUser.name||'?').charAt(0).toUpperCase())}</div>
-              <p style="font-size:17px;font-weight:700;margin-top:12px;letter-spacing:-0.01em">${escapeHtml(currentUser.name)}</p>
-              <p style="font-size:12.5px;color:var(--text-soft);margin-top:2px">@${escapeHtml(currentUser.username)} · ${getRoleLabel()}</p>
-            </div>
-            <div style="display:flex;flex-direction:column;gap:7px;padding-bottom:18px" class="page-in s1">
-              <button onclick="toggleTheme()" class="setting-row">
-                <div class="setting-ico" style="background:var(--amber-dim)"><i class="fas fa-circle-half-stroke" style="color:var(--amber)"></i></div>
-                <span class="setting-label">Mode Tampilan</span>
-                <span style="font-size:11px;font-weight:600;color:var(--text-soft);margin-right:8px;text-transform:capitalize">${getTheme() === 'dark' ? '🌙 Gelap' : '☀️ Terang'}</span>
-                <i class="fas fa-chevron-right setting-arrow"></i>
-              </button>
-              <button onclick="updateLocation();showToast('Refresh lokasi')" class="setting-row">
-                <div class="setting-ico" style="background:var(--green-dim)"><i class="fas fa-location-dot" style="color:var(--green)"></i></div>
-                <span class="setting-label">Refresh Lokasi</span>
-                <i class="fas fa-chevron-right setting-arrow"></i>
-              </button>
-              <button onclick="manualRefreshData()" class="setting-row">
-                <div class="setting-ico" style="background:var(--accent-dim)"><i class="fas fa-rotate" style="color:var(--accent)"></i></div>
-                <span class="setting-label">Refresh Data</span>
-                <i class="fas fa-chevron-right setting-arrow"></i>
-              </button>
-              <button onclick="logout()" class="setting-row">
-                <div class="setting-ico" style="background:var(--red-dim)"><i class="fas fa-right-from-bracket" style="color:var(--red)"></i></div>
-                <span class="setting-label">Keluar Aplikasi</span>
-                <i class="fas fa-chevron-right setting-arrow"></i>
-              </button>
-              ${isAdmin() ? `<button onclick="router.navigate('adminLogs')" class="setting-row">
-                <div class="setting-ico" style="background:var(--accent-dim)"><i class="fas fa-clock-rotate-left" style="color:var(--accent)"></i></div>
-                <span class="setting-label">Log Aktivitas Admin</span>
-                <span style="font-size:11px;font-weight:700;color:var(--text-soft);margin-right:8px">${cachedAuditLogs.length} log</span>
-                <i class="fas fa-chevron-right setting-arrow"></i>
-              </button>` : ''}
-              ${isAdmin() ? `<button onclick="toggleAdminMoreMenu()" class="setting-row">
-                <div class="setting-ico" style="background:var(--accent-dim)"><i class="fas fa-layer-group" style="color:var(--accent)"></i></div>
-                <span class="setting-label">Menu Lainnya</span>
-                <span style="font-size:11px;font-weight:700;color:var(--text-soft);margin-right:8px">${adminMoreOpen ? 'Tutup' : 'Buka'}</span>
-                <i class="fas ${adminMoreOpen ? 'fa-chevron-up' : 'fa-chevron-down'} setting-arrow"></i>
-              </button>` : ''}
-              <div class="card" style="padding:14px 16px;margin-top:8px">
-                <p class="label-xs">Info Supabase</p>
-                <div id="settings-summary"></div>
+            <div style="padding:34px 0 14px;display:flex;justify-content:space-between;align-items:center" class="page-in">
+              <div>
+                <p class="page-title">User</p>
+                <p class="page-subtitle">Menu admin dipisah per halaman agar tidak menumpuk.</p>
               </div>
             </div>
+            <div id="settings-summary" style="padding-bottom:18px" class="page-in s1"></div>
           </div>`;
         renderSettingsSummary();
       }
@@ -7708,6 +7745,8 @@ Masukkan PIN admin:`);
   window.updateReceiptSettingsPreview = updateReceiptSettingsPreview;
   window.openStaffDailyNoteLink = openStaffDailyNoteLink;
   window.formatMoneyInputElement = formatMoneyInputElement;
+  window.printTransactionReceipt = printTransactionReceipt;
+  window.openAdminProPage = openAdminProPage;
   window.deleteTransaction = deleteTransaction;
   window.restoreDeletedTransaction = restoreDeletedTransaction;
   window.hardDeleteTransaction = hardDeleteTransaction;
