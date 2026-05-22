@@ -5229,9 +5229,33 @@ Masukkan PIN admin:`);
   function saveBase64ToAndroidDownloads(filename, mimeType, base64Data) {
     const bridge = getAndroidStorageBridge();
     if (!bridge) return false;
+    const safeFilename = String(filename || 'backup.txt');
+    const safeMime = String(mimeType || 'application/octet-stream');
+    const data = String(base64Data || '');
     try {
-      bridge.saveFileToDownloads(String(filename || 'backup.txt'), String(mimeType || 'application/octet-stream'), String(base64Data || ''));
-      return true;
+      // Disamakan dengan AdminRocky_APK yang backup-nya sudah terbukti muncul di File Manager:
+      // panggil AndroidStorage.saveFileToDownloads langsung.
+      if (typeof bridge.saveFileToDownloads === 'function') {
+        const saved = bridge.saveFileToDownloads(safeFilename, safeMime, data);
+        if (!(saved === false || String(saved) === 'false')) return true;
+      }
+
+      // Cadangan untuk file besar kalau perangkat/WebView butuh mode potongan.
+      if (typeof bridge.beginSaveToDownloads === 'function' && typeof bridge.appendSaveChunk === 'function' && typeof bridge.finishSaveToDownloads === 'function') {
+        const sessionId = String(bridge.beginSaveToDownloads(safeFilename, safeMime) || '');
+        if (!sessionId) return false;
+        const chunkSize = 64 * 1024;
+        for (let i = 0; i < data.length; i += chunkSize) {
+          const ok = bridge.appendSaveChunk(sessionId, data.slice(i, i + chunkSize));
+          if (ok === false || String(ok) === 'false') {
+            if (typeof bridge.cancelSaveToDownloads === 'function') bridge.cancelSaveToDownloads(sessionId);
+            return false;
+          }
+        }
+        const finished = bridge.finishSaveToDownloads(sessionId);
+        return !(finished === false || String(finished) === 'false');
+      }
+      return false;
     } catch (e) {
       console.warn('Android native save gagal, fallback browser download:', e);
       return false;
