@@ -855,7 +855,7 @@
   let cachedTransactions = [], cachedAttendance = [], cachedUsers = [], cachedAuditLogs = [], cachedClosings = [], cachedManualBonuses = [];
   let adminNotifBootstrapped = false;
   let adminNotifSeenIds = new Set();
-  let cachedBonusSettings = { transactionBonusRate: 0.015, closingBonusPerMinute: 100 };
+  let cachedBonusSettings = { transactionBonusRate: 0.015, transactionBonusPercent: 1.5, closingBonusPerMinute: 100, closingDeadlineTime: '18:00', closingDeadlineHour: 18, closingDeadlineMinute: 0, closingDeadlineMinutes: 1080 };
   let cachedHeaderGuideNote = { id: HEADER_GUIDE_NOTE_DOC_ID, note: DEFAULT_HEADER_GUIDE_NOTE, updatedAtMs: 0, updatedBy: '', updatedByName: '' };
   let cachedStaffDailyHomeNote = { id: STAFF_DAILY_NOTE_DOC_ID, note: DEFAULT_STAFF_DAILY_NOTE, enabled: true, updatedAtMs: 0, updatedBy: '', updatedByName: '' };
   let cachedReceiptTextSettings = { id: RECEIPT_TEXT_DOC_ID, ...DEFAULT_RECEIPT_TEXT_SETTINGS, updatedAtMs: 0, updatedBy: '', updatedByName: '' };
@@ -865,7 +865,7 @@
   let attendancePageUserFilter = 'all', attendancePageDateFilter = toDateKey(nowDate()), attendancePageShowDeleted = false, attendancePageLimit = 30;
   const TX_SYNC_LIMIT_ADMIN = 800, TX_SYNC_LIMIT_STAFF = 400, ATT_SYNC_LIMIT_ADMIN = 800, ATT_SYNC_LIMIT_STAFF = 400, AUDIT_SYNC_LIMIT = 40, CLOSING_SYNC_LIMIT = 120, MANUAL_BONUS_SYNC_LIMIT = 250, HISTORY_PAGE_STEP = 30, INACTIVE_USER_STEP = 30;
   const ATTENDANCE_PAGE_STEP = 30;
-  const CLOSING_DEADLINE_HOUR = 18, CLOSING_DEADLINE_MINUTE = 0, DEFAULT_CLOSING_BONUS_PER_MINUTE = 100, DEFAULT_TRANSACTION_BONUS_RATE = 0.015;
+  const DEFAULT_CLOSING_DEADLINE_HOUR = 18, DEFAULT_CLOSING_DEADLINE_MINUTE = 0, DEFAULT_CLOSING_DEADLINE_TIME = '18:00', DEFAULT_CLOSING_BONUS_PER_MINUTE = 100, DEFAULT_TRANSACTION_BONUS_RATE = 0.015;
   const RISMA_MANUAL_CLOSING_DOC_ID = '__risma_manual_closing';
   const RISMA_MANUAL_CLOSING_COLLECTION = 'closings';
   let staffSwipeStartX = 0, staffSwipeStartY = 0, staffSwipeStartT = 0;
@@ -1659,7 +1659,7 @@
     const closing = targetUser ? (getTodayUserClosing(targetUser.username) || getTodayGlobalClosingForUser(targetUser.username)) : getTodayGlobalClosing();
     const userBonusHash = getStaffClosingUsers().map(u => `${sanitizeUsername(u.username)}:${getUserClosingBonusPerMinute(u.username)}`).join(',');
     const manualClosingHash = getRismaManualClosingAllowedUsers().join(',') + '|' + (cachedRismaManualClosingConfig?.updatedAtMs || '');
-    const hash = [targetValue, closing?.id || '', closing?.closed === true ? '1' : '0', closing?.closingTime || '', closing?.manualClosingTime || '', closing?.editedAtMs || '', closing?.canceledAtMs || '', cachedUsers.length, getClosingBonusPerMinute(), userBonusHash, manualClosingHash].join('|');
+    const hash = [targetValue, closing?.id || '', closing?.closed === true ? '1' : '0', closing?.closingTime || '', closing?.manualClosingTime || '', closing?.editedAtMs || '', closing?.canceledAtMs || '', cachedUsers.length, getClosingBonusPerMinute(), getClosingDeadlineTimeLabel(), userBonusHash, manualClosingHash].join('|');
     if (force || hash !== adminClosingPanelHash || !box.innerHTML.trim()) {
       adminClosingPanelHash = hash;
       renderAdminClosingPanel();
@@ -1794,6 +1794,91 @@
     const amount = Number(cachedBonusSettings?.closingBonusPerMinute);
     return Number.isFinite(amount) && amount >= 0 ? amount : DEFAULT_CLOSING_BONUS_PER_MINUTE;
   }
+  function getDefaultBonusSettings() {
+    return {
+      transactionBonusRate: DEFAULT_TRANSACTION_BONUS_RATE,
+      transactionBonusPercent: Number((DEFAULT_TRANSACTION_BONUS_RATE * 100).toFixed(3)),
+      closingBonusPerMinute: DEFAULT_CLOSING_BONUS_PER_MINUTE,
+      closingDeadlineTime: DEFAULT_CLOSING_DEADLINE_TIME,
+      closingDeadlineHour: DEFAULT_CLOSING_DEADLINE_HOUR,
+      closingDeadlineMinute: DEFAULT_CLOSING_DEADLINE_MINUTE,
+      closingDeadlineMinutes: (DEFAULT_CLOSING_DEADLINE_HOUR * 60) + DEFAULT_CLOSING_DEADLINE_MINUTE
+    };
+  }
+  function normalizeClosingDeadlineParts(value = null, fallback = null) {
+    const fb = fallback || { hour: DEFAULT_CLOSING_DEADLINE_HOUR, minute: DEFAULT_CLOSING_DEADLINE_MINUTE };
+    if (value && typeof value === 'object') {
+      const direct = value.deadlineTime ?? value.closingDeadlineTime ?? value.deadline ?? value.jamClosing ?? value.jam_closing ?? null;
+      if (direct !== null && direct !== undefined && String(direct).trim() !== '') return normalizeClosingDeadlineParts(direct, fb);
+      const rawHour = value.deadlineHour ?? value.closingDeadlineHour ?? value.hour ?? null;
+      const rawMinute = value.deadlineMinute ?? value.closingDeadlineMinute ?? value.minute ?? null;
+      const hour = Number(rawHour);
+      const minute = Number(rawMinute);
+      if (Number.isInteger(hour) && Number.isInteger(minute) && hour >= 0 && hour <= 23 && minute >= 0 && minute <= 59) return { hour, minute };
+      const total = Number(value.deadlineMinutes ?? value.closingDeadlineMinutes ?? NaN);
+      if (Number.isFinite(total) && total >= 0) return { hour: Math.floor(total / 60) % 24, minute: Math.floor(total % 60) };
+      return fb;
+    }
+    const raw = String(value ?? '').trim().replace('.', ':').replace(/\s*WIB$/i, '');
+    const match = raw.match(/^(\d{1,2}):(\d{2})/);
+    if (match) {
+      const hour = Number(match[1]);
+      const minute = Number(match[2]);
+      if (Number.isInteger(hour) && Number.isInteger(minute) && hour >= 0 && hour <= 23 && minute >= 0 && minute <= 59) return { hour, minute };
+    }
+    return fb;
+  }
+  function getClosingDeadlineParts(source = null) {
+    if (source && typeof source === 'object') {
+      // Untuk data closing lama yang belum punya snapshot, fallback harus tetap 18:00
+      // agar perubahan setting terbaru tidak mengubah hitungan/riwayat lama.
+      return normalizeClosingDeadlineParts(source, { hour: DEFAULT_CLOSING_DEADLINE_HOUR, minute: DEFAULT_CLOSING_DEADLINE_MINUTE });
+    }
+    return normalizeClosingDeadlineParts(cachedBonusSettings || {}, { hour: DEFAULT_CLOSING_DEADLINE_HOUR, minute: DEFAULT_CLOSING_DEADLINE_MINUTE });
+  }
+  function getClosingDeadlineTimeLabel(source = null) {
+    const parts = getClosingDeadlineParts(source);
+    return `${String(parts.hour).padStart(2,'0')}:${String(parts.minute).padStart(2,'0')}`;
+  }
+  function getClosingDeadlineMinutes(source = null) {
+    const parts = getClosingDeadlineParts(source);
+    return (parts.hour * 60) + parts.minute;
+  }
+  function getClosingDeadlineSnapshot(source = null) {
+    const parts = getClosingDeadlineParts(source);
+    const label = `${String(parts.hour).padStart(2,'0')}:${String(parts.minute).padStart(2,'0')}`;
+    return {
+      deadline: `${label} WIB`,
+      deadlineTime: label,
+      deadlineHour: parts.hour,
+      deadlineMinute: parts.minute,
+      deadlineMinutes: (parts.hour * 60) + parts.minute,
+      closingDeadlineTime: label,
+      closingDeadlineHour: parts.hour,
+      closingDeadlineMinute: parts.minute,
+      closingDeadlineMinutes: (parts.hour * 60) + parts.minute
+    };
+  }
+  function normalizeBonusSettings(data = {}) {
+    const defaults = getDefaultBonusSettings();
+    const parts = normalizeClosingDeadlineParts(data || {}, { hour: DEFAULT_CLOSING_DEADLINE_HOUR, minute: DEFAULT_CLOSING_DEADLINE_MINUTE });
+    const deadlineLabel = `${String(parts.hour).padStart(2,'0')}:${String(parts.minute).padStart(2,'0')}`;
+    const trxRate = Number.isFinite(Number(data.transactionBonusRate)) ? Number(data.transactionBonusRate) : defaults.transactionBonusRate;
+    const trxPercent = Number.isFinite(Number(data.transactionBonusPercent)) ? Number(data.transactionBonusPercent) : Number((trxRate * 100).toFixed(3));
+    const closingPerMinute = Number.isFinite(Number(data.closingBonusPerMinute)) ? Number(data.closingBonusPerMinute) : defaults.closingBonusPerMinute;
+    return {
+      transactionBonusRate: trxRate,
+      transactionBonusPercent: trxPercent,
+      closingBonusPerMinute: closingPerMinute,
+      closingDeadlineTime: deadlineLabel,
+      closingDeadlineHour: parts.hour,
+      closingDeadlineMinute: parts.minute,
+      closingDeadlineMinutes: (parts.hour * 60) + parts.minute,
+      updatedAtMs: Number(data.updatedAtMs || 0),
+      updatedBy: data.updatedBy || '',
+      updatedByName: data.updatedByName || ''
+    };
+  }
   function calculateDistance(la1,lo1,la2,lo2){const R=6371e3,dL=(la2-la1)*Math.PI/180,dO=(lo2-lo1)*Math.PI/180,a=Math.sin(dL/2)**2+Math.cos(la1*Math.PI/180)*Math.cos(la2*Math.PI/180)*Math.sin(dO/2)**2;return R*2*Math.atan2(Math.sqrt(a),Math.sqrt(1-a));}
   function isDailyEmployee(userOrUsername) {
     const user = typeof userOrUsername === 'object' ? userOrUsername : getUserByUsername(userOrUsername);
@@ -1884,10 +1969,7 @@
     ]);
     if (bonusSnap?.exists()) {
       const data = bonusSnap.data() || {};
-      cachedBonusSettings = {
-        transactionBonusRate: Number.isFinite(Number(data.transactionBonusRate)) ? Number(data.transactionBonusRate) : DEFAULT_TRANSACTION_BONUS_RATE,
-        closingBonusPerMinute: Number.isFinite(Number(data.closingBonusPerMinute)) ? Number(data.closingBonusPerMinute) : DEFAULT_CLOSING_BONUS_PER_MINUTE
-      };
+      cachedBonusSettings = normalizeBonusSettings(data);
     }
     if (!userSnap.exists()) throw new Error('User tidak ditemukan saat cek bonus');
     const data = userSnap.data() || {};
@@ -1949,6 +2031,7 @@
         transactionBonusRate: trxPercent / 100,
         transactionBonusPercent: trxPercent,
         closingBonusPerMinute: closingPerMinute,
+        ...getClosingDeadlineSnapshot(),
         updatedAt: serverTimestamp(),
         updatedAtMs: Date.now(),
         updatedBy: currentUser.username,
@@ -2013,6 +2096,82 @@
         </div>
       </div>`;
   }
+
+
+  async function saveClosingDeadlineSettings() {
+    if (!isAdmin()) return showToast('Hanya admin!', true);
+    if (isBusy) return showToast('Tunggu proses selesai', true);
+    const raw = String($('closing-deadline-time')?.value || '').trim();
+    const parsed = parseClosingTimeInput(raw);
+    if (!parsed) return showToast('Format jam closing tidak valid. Pakai HH:MM, contoh 19:00', true);
+    const oldLabel = getClosingDeadlineTimeLabel();
+    if (parsed.label === oldLabel) return showToast('Jam closing masih sama');
+    const pin = await askPin(`Ubah jam closing default dari ${oldLabel} ke ${parsed.label} WIB?
+
+Catatan: ini hanya berlaku untuk closing baru. Bonus closing lama tetap pakai snapshot deadline masing-masing.
+
+Masukkan PIN admin:`);
+    if (!pin) return;
+    if (!(await requireCurrentAdminPin(pin))) return;
+    setLoading(true);
+    try {
+      const payload = {
+        ...getClosingDeadlineSnapshot(parsed),
+        updatedAt: serverTimestamp(),
+        updatedAtMs: Date.now(),
+        updatedBy: currentUser.username,
+        updatedByName: currentUser.name
+      };
+      await setDoc(doc(db, 'closings', '__bonus_settings'), {
+        ...payload,
+        id: '__bonus_settings',
+        dateKey: '__bonus_settings',
+        closed: false,
+        type: 'bonus_settings'
+      }, { merge: true });
+      cachedBonusSettings = normalizeBonusSettings({ ...cachedBonusSettings, ...payload });
+      await logAudit('closing_deadline_update', { oldDeadlineTime: oldLabel, closingDeadlineTime: parsed.label, closingDeadlineMinutes: (parsed.hour * 60) + parsed.minute });
+      showToast(`✓ Jam closing default: ${parsed.label} WIB`);
+      adminClosingPanelHash = '';
+      await refreshCurrentPage();
+    } catch (e) {
+      console.error(e);
+      showToast('Gagal simpan jam closing: ' + (e.code || e.message || 'cek Supabase'), true);
+    }
+    setLoading(false);
+  }
+
+  function resetClosingDeadlineForm() {
+    const input = $('closing-deadline-time');
+    if (input) input.value = getClosingDeadlineTimeLabel();
+  }
+
+  function renderClosingDeadlineSettingsCard() {
+    const deadlineLabel = getClosingDeadlineTimeLabel();
+    const updatedLabel = cachedBonusSettings?.updatedAtMs ? new Date(Number(cachedBonusSettings.updatedAtMs)).toLocaleString('id-ID', { timeZone:'Asia/Jakarta' }) : 'Default sistem';
+    return `<div class="card" style="padding:14px 16px;margin-bottom:10px;border-color:rgba(211,107,53,.18)!important;background:linear-gradient(135deg,#fdf9f4 0%,#f7f2ea 100%)!important">
+      <div style="display:flex;align-items:flex-start;justify-content:space-between;gap:10px;margin-bottom:10px">
+        <div style="min-width:0;flex:1">
+          <p class="label-xs" style="margin:0 0 6px;color:var(--accent)">Pengaturan Jam Closing</p>
+          <div style="font-size:15px;font-weight:900;letter-spacing:-.02em;line-height:1.2">Deadline default ${escapeHtml(deadlineLabel)} WIB</div>
+          <div style="font-size:10.8px;color:var(--text-soft);margin-top:5px;line-height:1.35">Perubahan jam ini hanya untuk closing baru. Closing lama tetap pakai snapshot deadline yang tersimpan.</div>
+        </div>
+        <span class="status-pill status-ok" style="font-size:10px;padding:6px 10px;white-space:nowrap"><i class="fas fa-clock"></i> Aktif</span>
+      </div>
+      <div style="display:grid;grid-template-columns:1fr;gap:8px">
+        <div>
+          <label style="font-size:10px;color:var(--text-ghost);font-weight:800;text-transform:uppercase;margin-bottom:6px;display:block">Jam Closing</label>
+          <input id="closing-deadline-time" type="time" class="g-input" value="${escapeHtml(deadlineLabel)}" style="font-family:var(--num-font);font-weight:800" />
+        </div>
+        <div style="display:grid;grid-template-columns:1fr 1fr;gap:8px">
+          <button onclick="saveClosingDeadlineSettings()" class="btn btn-primary" style="padding:11px 12px;font-size:12px"><i class="fas fa-floppy-disk"></i> Simpan Jam</button>
+          <button onclick="resetClosingDeadlineForm()" class="btn btn-glass" style="padding:11px 12px;font-size:12px"><i class="fas fa-rotate-left"></i> Reset</button>
+        </div>
+      </div>
+      <div style="font-size:10px;color:var(--text-ghost);margin-top:8px;line-height:1.35">Update setting: ${escapeHtml(updatedLabel)}${cachedBonusSettings?.updatedByName ? ` · ${escapeHtml(cachedBonusSettings.updatedByName)}` : ''}</div>
+    </div>`;
+  }
+
 
 
 
@@ -2259,14 +2418,13 @@ Masukkan PIN admin:`);
     const u = username ? sanitizeUsername(username) : '';
     return u ? `${dateKey}_${u}` : dateKey;
   }
-  function getClosingDelayMinutes(date = new Date()) {
+  function getClosingDelayMinutes(date = new Date(), source = null) {
     const wib = getWIBDate(date);
     const currentMinutes = (wib.hour * 60) + wib.minute;
-    const deadlineMinutes = (CLOSING_DEADLINE_HOUR * 60) + CLOSING_DEADLINE_MINUTE;
-    return Math.max(0, currentMinutes - deadlineMinutes);
+    return Math.max(0, currentMinutes - getClosingDeadlineMinutes(source));
   }
-  function formatClosingDeadline() {
-    return `${String(CLOSING_DEADLINE_HOUR).padStart(2,'0')}:${String(CLOSING_DEADLINE_MINUTE).padStart(2,'0')} WIB`;
+  function formatClosingDeadline(source = null) {
+    return `${getClosingDeadlineTimeLabel(source)} WIB`;
   }
   function normalizeTimeLabel(value) {
     if (!value) return '';
@@ -2275,13 +2433,13 @@ Masukkan PIN admin:`);
     if (!match) return '';
     return `${String(Number(match[1])).padStart(2,'0')}:${match[2]}`;
   }
-  function getDeadlineTimeLabel() {
-    return `${String(CLOSING_DEADLINE_HOUR).padStart(2,'0')}:${String(CLOSING_DEADLINE_MINUTE).padStart(2,'0')}`;
+  function getDeadlineTimeLabel(source = null) {
+    return getClosingDeadlineTimeLabel(source);
   }
-  function getClosingTimeFromDelay(delayMinutes) {
+  function getClosingTimeFromDelay(delayMinutes, source = null) {
     const delay = Number(delayMinutes || 0);
     if (!Number.isFinite(delay) || delay <= 0) return '';
-    const total = (CLOSING_DEADLINE_HOUR * 60) + CLOSING_DEADLINE_MINUTE + delay;
+    const total = getClosingDeadlineMinutes(source) + delay;
     const hour = Math.floor(total / 60) % 24;
     const minute = total % 60;
     return `${String(hour).padStart(2,'0')}:${String(minute).padStart(2,'0')}`;
@@ -2303,9 +2461,9 @@ Masukkan PIN admin:`);
     const editedAtMs = Number(closing.editedAtMs || 0);
     if (manualTime && editedAtMs && (!closedAtMs || editedAtMs >= closedAtMs)) return manualTime;
     if (actualTime) return actualTime;
-    const deadlineTime = getDeadlineTimeLabel();
+    const deadlineTime = getDeadlineTimeLabel(closing);
     if (savedClosingTime && savedClosingTime !== deadlineTime) return savedClosingTime;
-    const delayTime = getClosingTimeFromDelay(closing.delayMinutes);
+    const delayTime = getClosingTimeFromDelay(closing.delayMinutes, closing);
     if (delayTime) return delayTime;
     if (closedAtMs) return new Date(closedAtMs).toLocaleTimeString('id-ID', { hour:'2-digit', minute:'2-digit', timeZone:'Asia/Jakarta' }).replace('.', ':');
     return manualTime || savedClosingTime || '';
@@ -2319,10 +2477,9 @@ Masukkan PIN admin:`);
     if (!Number.isInteger(hour) || !Number.isInteger(minute) || hour < 0 || hour > 23 || minute < 0 || minute > 59) return null;
     return { hour, minute, label: `${String(hour).padStart(2,'0')}:${String(minute).padStart(2,'0')}` };
   }
-  function getClosingDelayMinutesFromTime(hour, minute) {
+  function getClosingDelayMinutesFromTime(hour, minute, source = null) {
     const currentMinutes = (Number(hour) * 60) + Number(minute);
-    const deadlineMinutes = (CLOSING_DEADLINE_HOUR * 60) + CLOSING_DEADLINE_MINUTE;
-    return Math.max(0, currentMinutes - deadlineMinutes);
+    return Math.max(0, currentMinutes - getClosingDeadlineMinutes(source));
   }
   function getStaffClosingUsers(dateKey = toDateKey(nowDate())) {
     return activeUsers().filter(u => isClosingEligibleUser(u, dateKey));
@@ -2392,6 +2549,50 @@ Masukkan PIN admin:`);
     const bonusPerUser = bonusValues.length ? Math.max(...bonusValues) : 0;
     return { users: bonusUsers, targetUsers, eligibleUsers, bonusUsers, bonusByUser, bonusPerMinuteByUser, bonusPerUser, totalBonus };
   }
+
+  function buildClosingBonusByUserForEdit(closing, delayMinutes, targetUsername = null, dateKey = toDateKey(nowDate())) {
+    const delay = Math.max(0, Number(delayMinutes || 0));
+    const storedBonusByUser = closing?.bonusByUser && typeof closing.bonusByUser === 'object' ? closing.bonusByUser : {};
+    const storedPerMinuteByUser = closing?.bonusPerMinuteByUser && typeof closing.bonusPerMinuteByUser === 'object' ? closing.bonusPerMinuteByUser : {};
+    const canceled = getClosingCanceledUsersMap(closing);
+    const target = targetUsername ? sanitizeUsername(targetUsername) : null;
+    let usernames = [];
+    if (target) usernames = [target];
+    else usernames = [...new Set([...Object.keys(storedBonusByUser), ...Object.keys(storedPerMinuteByUser)].map(sanitizeUsername).filter(Boolean))];
+    if (!usernames.length && closing?.user) usernames = [sanitizeUsername(closing.user)].filter(Boolean);
+    if (!usernames.length) {
+      const legacyPerMinute = Number(closing?.bonusPerMinute);
+      const perMinute = Number.isFinite(legacyPerMinute) && legacyPerMinute >= 0 ? legacyPerMinute : getClosingBonusPerMinute();
+      const totalUsers = Math.max(0, Number(closing?.totalUsers || 0));
+      if (totalUsers > 0) {
+        const bonusPerUser = Math.round(delay * perMinute);
+        const users = Array.from({ length: totalUsers }, (_, idx) => ({ username: `legacy_${idx + 1}`, name: 'Legacy Closing', role: 'staff' }));
+        return { users, targetUsers: users, eligibleUsers: users, bonusUsers: users, bonusByUser: {}, bonusPerMinuteByUser: {}, bonusPerUser, totalBonus: bonusPerUser * totalUsers };
+      }
+      return buildClosingBonusByUser(delay, targetUsername, dateKey);
+    }
+    const bonusByUser = {};
+    const bonusPerMinuteByUser = {};
+    const users = [];
+    usernames.forEach(uname => {
+      if (!uname || canceled[uname]) return;
+      const user = getUserByUsername(uname) || { username: uname, name: uname, role: 'staff' };
+      if (isDailyEmployee(user)) return;
+      const storedPerMinute = Number(storedPerMinuteByUser[uname]);
+      const legacyPerMinute = Number(closing?.bonusPerMinute);
+      const perMinute = Number.isFinite(storedPerMinute) && storedPerMinute >= 0
+        ? storedPerMinute
+        : (Number.isFinite(legacyPerMinute) && legacyPerMinute >= 0 ? legacyPerMinute : getUserClosingBonusPerMinute(uname));
+      bonusPerMinuteByUser[uname] = perMinute;
+      bonusByUser[uname] = Math.round(delay * perMinute);
+      users.push(user);
+    });
+    const totalBonus = Object.values(bonusByUser).reduce((a,b)=>a+Number(b||0),0);
+    const bonusValues = Object.values(bonusByUser).map(v => Number(v || 0));
+    const bonusPerUser = bonusValues.length ? Math.max(...bonusValues) : 0;
+    return { users, targetUsers: users, eligibleUsers: users, bonusUsers: users, bonusByUser, bonusPerMinuteByUser, bonusPerUser, totalBonus };
+  }
+
   function isSpecialClosingDoc(c) {
     const id = String(c?.id || '');
     const dateKey = String(c?.dateKey || '');
@@ -2525,11 +2726,10 @@ Masukkan PIN admin:`);
     }).length;
   }
 
-  function isAtOrAfterClosingDeadline(date = new Date()) {
+  function isAtOrAfterClosingDeadline(date = new Date(), source = null) {
     const wib = getWIBDate(date);
     const currentMinutes = (wib.hour * 60) + wib.minute;
-    const deadlineMinutes = (CLOSING_DEADLINE_HOUR * 60) + CLOSING_DEADLINE_MINUTE;
-    return currentMinutes >= deadlineMinutes;
+    return currentMinutes >= getClosingDeadlineMinutes(source);
   }
 
   function renderBonusBreakdownHtml(bonusBreakdown, username = null, month = toMonthKey(nowDate())) {
@@ -2550,7 +2750,7 @@ Masukkan PIN admin:`);
           </div>
           ${showEstimate ? `<div style="text-align:right;flex-shrink:0"><div style="font-family:var(--num-font);font-size:16px;font-weight:900;color:var(--amber);line-height:1">Rp ${formatRupiah(estBonus)}</div><div style="font-size:8.5px;color:var(--text-ghost);font-weight:800;margin-top:3px;text-transform:uppercase">/ user</div></div>` : ''}
         </div>
-        ${showEstimate ? `<div style="font-size:10px;color:var(--text-soft);line-height:1.35;border-top:1px solid rgba(255,196,107,.16);padding-top:7px">Estimasi ini otomatis naik setiap menit setelah 18:00 WIB sampai admin melakukan closing.</div>` : ''}
+        ${showEstimate ? `<div style="font-size:10px;color:var(--text-soft);line-height:1.35;border-top:1px solid rgba(255,196,107,.16);padding-top:7px">Estimasi ini otomatis naik setiap menit setelah ${formatClosingDeadline()} sampai admin melakukan closing.</div>` : ''}
       </div>`;
     }
     return `<div style="display:flex;align-items:center;justify-content:space-between;gap:10px;padding:${compact?'10px 11px':'12px 13px'};border:1px solid rgba(255,196,107,.22);border-radius:13px;background:var(--amber-dim)">
@@ -2585,11 +2785,13 @@ Masukkan PIN admin:`);
     if (!pin) return;
     if (!(await requireCurrentAdminPin(pin))) return;
     const currentClosingTime = getCurrentWIBTimeLabel(nowDate());
-    const delayMinutes = getClosingDelayMinutes(nowDate());
+    const deadlineSnapshot = getClosingDeadlineSnapshot();
+    const delayMinutes = getClosingDelayMinutes(nowDate(), deadlineSnapshot);
     const { users, targetUsers, bonusByUser, bonusPerMinuteByUser, bonusPerUser, totalBonus } = buildClosingBonusByUser(delayMinutes, targetUsername, today);
     if (targetUsername && !targetUsers.length) return showToast('User belum absen / bukan karyawan harian, jadi tidak perlu closing.', true);
     if (!targetUsername && !targetUsers.length) return showToast('Belum ada user yang sudah absen atau karyawan harian untuk closing.', true);
     if (!confirm(`Yakin closing ${targetUsername ? getClosingTargetLabel(targetUser) : 'SEMUA USER'} sekarang?
+Deadline: ${deadlineSnapshot.deadline}
 Lewat deadline: ${delayMinutes} menit
 Bonus closing: per user sesuai setting masing-masing
 Target closing valid: ${targetUsers.length} · layak bonus: ${users.length}
@@ -2616,7 +2818,7 @@ ${users.length ? '' : 'Catatan: staff belum absen tidak ikut diclosing; karyawan
         canceled: false,
         canceledAtMs: null,
         editedAtMs: null,
-        deadline: formatClosingDeadline(),
+        ...deadlineSnapshot,
         delayMinutes,
         bonusPerMinute: getClosingBonusPerMinute(),
         bonusPerMinuteByUser,
@@ -2642,6 +2844,7 @@ ${users.length ? '' : 'Catatan: staff belum absen tidak ikut diclosing; karyawan
         manualClosingTime: currentClosingTime,
         canceled: false,
         editedAtMs: null,
+        ...deadlineSnapshot,
         delayMinutes,
         bonusPerMinute: getClosingBonusPerMinute(),
         bonusPerMinuteByUser,
@@ -2651,7 +2854,7 @@ ${users.length ? '' : 'Catatan: staff belum absen tidak ikut diclosing; karyawan
         totalUsers: users.length,
         totalBonus
       }, ...cachedClosings.filter(c => c.id !== docId)];
-      await logAudit('closing_day', { dateKey: today, scope: targetUsername ? 'user' : 'global', user: targetUsername || null, closingTime: currentClosingTime, delayMinutes, bonusPerUser, totalUsers: users.length, totalBonus });
+      await logAudit('closing_day', { dateKey: today, scope: targetUsername ? 'user' : 'global', user: targetUsername || null, closingTime: currentClosingTime, deadlineTime: deadlineSnapshot.deadlineTime, delayMinutes, bonusPerUser, totalUsers: users.length, totalBonus });
       showToast(delayMinutes ? `✓ Closing ${targetUsername ? targetUser.name : 'global'} · total bonus Rp ${formatRupiah(totalBonus)}` : `✓ Closing ${targetUsername ? targetUser.name : 'global'} berhasil`);
       await refreshCurrentPage();
     } catch (e) {
@@ -2677,9 +2880,9 @@ ${users.length ? '' : 'Catatan: staff belum absen tidak ikut diclosing; karyawan
     const pin = await askPin('Masukkan PIN admin untuk simpan edit jam closing:');
     if (!pin) return;
     if (!(await requireCurrentAdminPin(pin))) return;
-    const delayMinutes = getClosingDelayMinutesFromTime(parsed.hour, parsed.minute);
-    const { users, bonusByUser, bonusPerMinuteByUser, bonusPerUser, totalBonus } = buildClosingBonusByUser(delayMinutes, targetUsername, closing.dateKey || toDateKey(nowDate()));
-    if (!confirm(`Simpan jam closing ${parsed.label} WIB?\nLewat deadline: ${delayMinutes} menit\nBonus closing: per user sesuai setting masing-masing\nTotal user: ${users.length}\nTotal bonus closing: Rp ${formatRupiah(totalBonus)}`)) return;
+    const delayMinutes = getClosingDelayMinutesFromTime(parsed.hour, parsed.minute, closing);
+    const { users, bonusByUser, bonusPerMinuteByUser, bonusPerUser, totalBonus } = buildClosingBonusByUserForEdit(closing, delayMinutes, targetUsername, closing.dateKey || toDateKey(nowDate()));
+    if (!confirm(`Simpan jam closing ${parsed.label} WIB?\nDeadline snapshot data ini: ${formatClosingDeadline(closing)}\nLewat deadline: ${delayMinutes} menit\nBonus closing: pakai snapshot bonus user yang tersimpan di closing ini\nTotal user: ${users.length}\nTotal bonus closing: Rp ${formatRupiah(totalBonus)}`)) return;
     setLoading(true);
     try {
       const dateKey = closing.dateKey || toDateKey(nowDate());
@@ -2688,7 +2891,7 @@ ${users.length ? '' : 'Catatan: staff belum absen tidak ikut diclosing; karyawan
         manualClosingTime: parsed.label,
         closingTime: parsed.label,
         delayMinutes,
-        bonusPerMinute: getClosingBonusPerMinute(),
+        bonusPerMinute: Number.isFinite(Number(closing.bonusPerMinute)) ? Number(closing.bonusPerMinute) : getClosingBonusPerMinute(),
         bonusPerMinuteByUser,
         bonusPerUser,
         bonusByUser,
@@ -2706,7 +2909,7 @@ ${users.length ? '' : 'Catatan: staff belum absen tidak ikut diclosing; karyawan
         manualClosingTime: parsed.label,
         closingTime: parsed.label,
         delayMinutes,
-        bonusPerMinute: getClosingBonusPerMinute(),
+        bonusPerMinute: Number.isFinite(Number(c.bonusPerMinute)) ? Number(c.bonusPerMinute) : getClosingBonusPerMinute(),
         bonusPerMinuteByUser,
         bonusPerUser,
         bonusByUser,
@@ -2903,7 +3106,7 @@ ${lockedByGlobal ? 'Hanya user ini yang dibuka dari closing global. Bonus closin
     cachedHeaderGuideNote = { id: HEADER_GUIDE_NOTE_DOC_ID, note: DEFAULT_HEADER_GUIDE_NOTE, updatedAtMs: 0, updatedBy: '', updatedByName: '' };
       cachedStaffDailyHomeNote = { id: STAFF_DAILY_NOTE_DOC_ID, note: DEFAULT_STAFF_DAILY_NOTE, enabled: true, updatedAtMs: 0, updatedBy: '', updatedByName: '' };
     cachedReceiptTextSettings = { id: RECEIPT_TEXT_DOC_ID, ...DEFAULT_RECEIPT_TEXT_SETTINGS, updatedAtMs: 0, updatedBy: '', updatedByName: '' };
-    cachedBonusSettings = { transactionBonusRate: DEFAULT_TRANSACTION_BONUS_RATE, closingBonusPerMinute: DEFAULT_CLOSING_BONUS_PER_MINUTE };
+    cachedBonusSettings = getDefaultBonusSettings();
     attendanceReady = false;
     closeTransactionModal();
     stopRealtimeData();
@@ -3031,15 +3234,9 @@ ${lockedByGlobal ? 'Hanya user ini yang dibuka dari closing global. Bonus closin
     unsubBonusSettings = onSnapshot(doc(db, 'closings', '__bonus_settings'), (snap) => {
       if (snap.exists()) {
         const data = snap.data() || {};
-        cachedBonusSettings = {
-          transactionBonusRate: Number.isFinite(Number(data.transactionBonusRate)) ? Number(data.transactionBonusRate) : DEFAULT_TRANSACTION_BONUS_RATE,
-          closingBonusPerMinute: Number.isFinite(Number(data.closingBonusPerMinute)) ? Number(data.closingBonusPerMinute) : DEFAULT_CLOSING_BONUS_PER_MINUTE,
-          updatedAtMs: Number(data.updatedAtMs || 0),
-          updatedBy: data.updatedBy || '',
-          updatedByName: data.updatedByName || ''
-        };
+        cachedBonusSettings = normalizeBonusSettings(data);
       } else {
-        cachedBonusSettings = { transactionBonusRate: DEFAULT_TRANSACTION_BONUS_RATE, closingBonusPerMinute: DEFAULT_CLOSING_BONUS_PER_MINUTE };
+        cachedBonusSettings = getDefaultBonusSettings();
       }
       refreshCurrentPage();
     }, (err) => console.error('Bonus settings listener gagal:', err));
@@ -3121,6 +3318,7 @@ ${lockedByGlobal ? 'Hanya user ini yang dibuka dari closing global. Bonus closin
     else if (currentPage === 'history') { if (isAdmin()) await renderHistory(); else renderStaffTodayHistoryPage(); }
     else if (currentPage === 'attendance') renderAttendanceAdminPage();
     else if (currentPage === 'report') await renderReport();
+    else if (currentPage === 'closing') renderAdminClosingPanelMaybe();
     else if (currentPage === 'settings') {
       // Supabase compat layer melakukan polling realtime. Saat admin sedang mengetik form,
       // polling dapat memanggil renderSettingsSummary() dan menimpa innerHTML, sehingga kolom
@@ -4397,7 +4595,8 @@ ${lockedByGlobal ? 'Hanya user ini yang dibuka dari closing global. Bonus closin
     const userClosing = targetUsername ? getTodayUserClosing(targetUsername) : null;
     const closing = targetUsername ? (userClosing || globalClosing) : rawGlobalClosing;
     const lockedByGlobal = !!(targetUsername && !userClosing && globalClosing);
-    const lateMinutes = getClosingDelayMinutes(nowDate());
+    const activeDeadlineSnapshot = getClosingDeadlineSnapshot();
+    const lateMinutes = getClosingDelayMinutes(nowDate(), activeDeadlineSnapshot);
     const preview = buildClosingBonusByUser(lateMinutes, targetUsername, toDateKey(nowDate()));
     const displayDelay = closing ? (closing.delayMinutes || 0) : lateMinutes;
     const displayBonus = closing ? (targetUsername ? getClosingBonusValue(closing, targetUsername) : getClosingBonusValue(closing)) : (targetUsername ? (preview.bonusByUser[targetUsername] || 0) : preview.totalBonus);
@@ -4409,6 +4608,7 @@ ${lockedByGlobal ? 'Hanya user ini yang dibuka dari closing global. Bonus closin
       ? (lockedByGlobal ? 'User ini sudah terkunci oleh closing global hari ini.' : (targetUsername ? 'User ini terkunci transaksi. User lain tetap bisa jalan.' : 'Semua staff terkunci transaksi sampai ganti tanggal.'))
       : `Pilih user yang sudah absen hari ini atau karyawan harian. Yang tidak hadir tidak perlu diclosing.`;
     box.innerHTML = `
+      ${renderClosingDeadlineSettingsCard()}
       <div style="background:linear-gradient(145deg,var(--bg3),var(--bg2));border:1px solid ${closing?'rgba(255,196,107,.24)':'rgba(91,143,255,.18)'};border-radius:18px;padding:14px;box-shadow:0 10px 28px rgba(0,0,0,.14);position:relative;overflow:hidden">
         <div style="position:absolute;top:-44px;right:-50px;width:132px;height:132px;background:radial-gradient(circle,${closing?'rgba(255,196,107,.16)':'rgba(91,143,255,.16)'} 0%,transparent 70%);pointer-events:none"></div>
 
@@ -4427,6 +4627,7 @@ ${lockedByGlobal ? 'Hanya user ini yang dibuka dari closing global. Bonus closin
           <option value="global">Semua / Global</option>
           ${getStaffClosingUsers().map(u => `<option value="${escapeHtml(u.username)}" ${targetUsername === sanitizeUsername(u.username) ? 'selected' : ''}>${escapeHtml(u.name || u.username)} (@${escapeHtml(u.username)}) · ${isDailyEmployee(u) ? 'HARIAN' : 'SUDAH ABSEN'} ${isUserClosedToday(u.username) ? '· SUDAH CLOSING' : ''}</option>`).join('')}
         </select>
+        <div style="font-size:10.5px;color:var(--text-soft);line-height:1.35;margin:-3px 0 10px;position:relative;z-index:1">${closing ? `Deadline snapshot data ini: ${formatClosingDeadline(closing)}` : `Deadline closing baru: ${activeDeadlineSnapshot.deadline}`}</div>
 
         <div style="display:grid;grid-template-columns:1fr 1fr;gap:8px;position:relative;z-index:1;margin-bottom:11px">
           <div style="background:var(--surface);border:1px solid var(--border);border-radius:14px;padding:10px 11px">
@@ -5877,7 +6078,7 @@ Masukkan PIN admin:`);
         })),
         closings: sortByCreatedDesc((cachedClosings || []).filter(isClosingDataRecord)).map(c => serializeBackupRecord(c)),
         manualBonuses: sortByCreatedDesc((cachedManualBonuses || []).filter(b => b && b.deleted !== true && b.deleted !== 'true')).map(b => serializeBackupRecord(b)),
-        bonusSettings: serializeBackupRecord({ ...(cachedBonusSettings || {}), transactionBonusRate: getTransactionBonusRate(), transactionBonusPercent: getTransactionBonusPercent(), closingBonusPerMinute: getClosingBonusPerMinute() }),
+        bonusSettings: serializeBackupRecord({ ...(cachedBonusSettings || {}), transactionBonusRate: getTransactionBonusRate(), transactionBonusPercent: getTransactionBonusPercent(), closingBonusPerMinute: getClosingBonusPerMinute(), ...getClosingDeadlineSnapshot() }),
         headerGuideNote: serializeBackupRecord(cachedHeaderGuideNote || { id: HEADER_GUIDE_NOTE_DOC_ID, note: DEFAULT_HEADER_GUIDE_NOTE }),
         staffDailyHomeNote: serializeBackupRecord(cachedStaffDailyHomeNote || { id: STAFF_DAILY_NOTE_DOC_ID, note: DEFAULT_STAFF_DAILY_NOTE, enabled: true }),
         receiptTextSettings: serializeBackupRecord(getReceiptTextSettingsSafe()),
@@ -6289,6 +6490,12 @@ Masukkan PIN admin:`);
               closingTime: String(c.closingTime || c.jam || ''),
               actualClosingTime: String(c.actualClosingTime || ''),
               manualClosingTime: String(c.manualClosingTime || ''),
+              deadline: String(c.deadline || c.deadlineTime || c.closingDeadlineTime || ''),
+              deadlineTime: getClosingDeadlineTimeLabel(c),
+              deadlineHour: getClosingDeadlineParts(c).hour,
+              deadlineMinute: getClosingDeadlineParts(c).minute,
+              deadlineMinutes: getClosingDeadlineMinutes(c),
+              closingDeadlineTime: getClosingDeadlineTimeLabel(c),
               delayMinutes: Number(c.delayMinutes || c.telat || 0),
               totalBonus: Number(c.totalBonus || c.bonus_closing || 0),
               bonusPerUser: Number(c.bonusPerUser || 0),
@@ -6427,7 +6634,7 @@ Masukkan PIN admin:`);
     cachedHeaderGuideNote = { id: HEADER_GUIDE_NOTE_DOC_ID, note: DEFAULT_HEADER_GUIDE_NOTE, updatedAtMs: 0, updatedBy: '', updatedByName: '' };
       cachedStaffDailyHomeNote = { id: STAFF_DAILY_NOTE_DOC_ID, note: DEFAULT_STAFF_DAILY_NOTE, enabled: true, updatedAtMs: 0, updatedBy: '', updatedByName: '' };
     cachedReceiptTextSettings = { id: RECEIPT_TEXT_DOC_ID, ...DEFAULT_RECEIPT_TEXT_SETTINGS, updatedAtMs: 0, updatedBy: '', updatedByName: '' };
-    cachedBonusSettings = { transactionBonusRate: DEFAULT_TRANSACTION_BONUS_RATE, closingBonusPerMinute: DEFAULT_CLOSING_BONUS_PER_MINUTE };
+    cachedBonusSettings = getDefaultBonusSettings();
     cachedUsers = currentUser ? [{ ...currentUser, username: sanitizeUsername(currentUser.username || 'admin'), active: true }] : [];
     attendanceReady = false;
     adminClosingPanelHash = '';
@@ -6553,7 +6760,7 @@ Ketik PIN admin untuk lanjut:`);
           createdAtMs: t.createdAtMs || ''
         }));
         const closingRows = (backup.data.closings || []).map(c => ({
-          id: c.id || '', dateKey: c.dateKey || '', monthKey: c.monthKey || '', user: c.user || '', name: c.name || '', scope: c.scope || '', closed: c.closed === true, canceled: c.canceled === true, closingTime: c.closingTime || c.actualClosingTime || c.manualClosingTime || '', delayMinutes: Number(c.delayMinutes || 0), totalBonus: Number(c.totalBonus || 0), bonusPerUser: Number(c.bonusPerUser || 0), bonusByUser: JSON.stringify(c.bonusByUser || {}), bonusPerMinuteByUser: JSON.stringify(c.bonusPerMinuteByUser || {}), canceledUsers: JSON.stringify(c.canceledUsers || {}), closedAtMs: c.closedAtMs || '', closedBy: c.closedBy || '', closedByName: c.closedByName || ''
+          id: c.id || '', dateKey: c.dateKey || '', monthKey: c.monthKey || '', user: c.user || '', name: c.name || '', scope: c.scope || '', closed: c.closed === true, canceled: c.canceled === true, closingTime: c.closingTime || c.actualClosingTime || c.manualClosingTime || '', deadline: c.deadline || formatClosingDeadline(c), deadlineTime: getClosingDeadlineTimeLabel(c), deadlineHour: getClosingDeadlineParts(c).hour, deadlineMinute: getClosingDeadlineParts(c).minute, deadlineMinutes: getClosingDeadlineMinutes(c), closingDeadlineTime: getClosingDeadlineTimeLabel(c), delayMinutes: Number(c.delayMinutes || 0), totalBonus: Number(c.totalBonus || 0), bonusPerUser: Number(c.bonusPerUser || 0), bonusByUser: JSON.stringify(c.bonusByUser || {}), bonusPerMinuteByUser: JSON.stringify(c.bonusPerMinuteByUser || {}), canceledUsers: JSON.stringify(c.canceledUsers || {}), closedAtMs: c.closedAtMs || '', closedBy: c.closedBy || '', closedByName: c.closedByName || ''
         }));
         const manualBonusRows = (backup.data.manualBonuses || []).map(b => ({
           id: b.id || '',
@@ -6575,6 +6782,12 @@ Ketik PIN admin untuk lanjut:`);
           transactionBonusRate: backup.data.bonusSettings?.transactionBonusRate ?? '',
           transactionBonusPercent: Number(backup.data.bonusSettings?.transactionBonusRate || 0) * 100,
           closingBonusPerMinute: backup.data.bonusSettings?.closingBonusPerMinute ?? '',
+          deadline: formatClosingDeadline(backup.data.bonusSettings || {}),
+          deadlineTime: getClosingDeadlineTimeLabel(backup.data.bonusSettings || {}),
+          deadlineHour: getClosingDeadlineParts(backup.data.bonusSettings || {}).hour,
+          deadlineMinute: getClosingDeadlineParts(backup.data.bonusSettings || {}).minute,
+          deadlineMinutes: getClosingDeadlineMinutes(backup.data.bonusSettings || {}),
+          closingDeadlineTime: getClosingDeadlineTimeLabel(backup.data.bonusSettings || {}),
           updatedAtMs: backup.data.bonusSettings?.updatedAtMs ?? '',
           updatedBy: backup.data.bonusSettings?.updatedBy ?? '',
           updatedByName: backup.data.bonusSettings?.updatedByName ?? ''
@@ -6694,6 +6907,7 @@ Ketik PIN admin untuk lanjut:`);
         transactionBonusRate: (() => { const rate = parseBackupNumber(s.transactionBonusRate, null); if (rate !== null && rate >= 0) return rate; const pct = parseBackupNumber(s.transactionBonusPercent, null); return pct !== null && pct >= 0 ? pct / 100 : DEFAULT_TRANSACTION_BONUS_RATE; })(),
         transactionBonusPercent: (() => { const pct = parseBackupNumber(s.transactionBonusPercent, null); if (pct !== null && pct >= 0) return pct; const rate = parseBackupNumber(s.transactionBonusRate, null); return rate !== null && rate >= 0 ? Number((rate * 100).toFixed(3)) : Number((DEFAULT_TRANSACTION_BONUS_RATE * 100).toFixed(3)); })(),
         closingBonusPerMinute: (() => { const n = parseBackupNumber(s.closingBonusPerMinute, null); return n !== null && n >= 0 ? n : DEFAULT_CLOSING_BONUS_PER_MINUTE; })(),
+        ...getClosingDeadlineSnapshot(s),
         updatedAt: serverTimestamp(),
         updatedAtMs: nowMs,
         updatedBy: restoredBy,
@@ -7067,6 +7281,12 @@ Ketik PIN admin untuk lanjut:`);
             closingTime: String(c.closingTime || c.jam || ''),
             actualClosingTime: String(c.actualClosingTime || ''),
             manualClosingTime: String(c.manualClosingTime || ''),
+            deadline: String(c.deadline || c.deadlineTime || c.closingDeadlineTime || ''),
+            deadlineTime: getClosingDeadlineTimeLabel(c),
+            deadlineHour: getClosingDeadlineParts(c).hour,
+            deadlineMinute: getClosingDeadlineParts(c).minute,
+            deadlineMinutes: getClosingDeadlineMinutes(c),
+            closingDeadlineTime: getClosingDeadlineTimeLabel(c),
             delayMinutes: Number(c.delayMinutes || c.telat || 0),
             totalBonus: Number(c.totalBonus || c.bonus_closing || 0),
             bonusPerUser: Number(c.bonusPerUser || 0),
@@ -8450,6 +8670,8 @@ Masukkan PIN admin:`);
   window.renderAdminClosingPanelMaybe = renderAdminClosingPanelMaybe;
   window.saveRismaManualClosingConfig = saveRismaManualClosingConfig;
   window.saveBonusSettings = saveBonusSettings;
+  window.saveClosingDeadlineSettings = saveClosingDeadlineSettings;
+  window.resetClosingDeadlineForm = resetClosingDeadlineForm;
   window.resetBonusSettingsForm = resetBonusSettingsForm;
   window.saveUserBonusControl = saveUserBonusControl;
   window.saveManualBonus = saveManualBonus;
@@ -8641,15 +8863,9 @@ Masukkan PIN admin:`);
     if (bonusSnap) {
       if (bonusSnap.exists()) {
         const data = bonusSnap.data() || {};
-        cachedBonusSettings = {
-          transactionBonusRate: Number.isFinite(Number(data.transactionBonusRate)) ? Number(data.transactionBonusRate) : DEFAULT_TRANSACTION_BONUS_RATE,
-          closingBonusPerMinute: Number.isFinite(Number(data.closingBonusPerMinute)) ? Number(data.closingBonusPerMinute) : DEFAULT_CLOSING_BONUS_PER_MINUTE,
-          updatedAtMs: Number(data.updatedAtMs || 0),
-          updatedBy: data.updatedBy || '',
-          updatedByName: data.updatedByName || ''
-        };
+        cachedBonusSettings = normalizeBonusSettings(data);
       } else {
-        cachedBonusSettings = { transactionBonusRate: DEFAULT_TRANSACTION_BONUS_RATE, closingBonusPerMinute: DEFAULT_CLOSING_BONUS_PER_MINUTE };
+        cachedBonusSettings = getDefaultBonusSettings();
       }
     }
 
