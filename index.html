@@ -863,6 +863,7 @@
   let unsubTransactions = null, unsubAttendance = null, unsubUsers = null, unsubAuditLogs = null, unsubClosings = null, unsubBonusSettings = null, unsubManualBonuses = null, unsubRismaManualClosing = null, unsubHeaderGuideNote = null, unsubStaffDailyHomeNote = null, unsubReceiptTextSettings = null, rangeStartDate = null, rangeEndDate = null;
   let attendanceReady = false, isBusy = false, auditLogLimit = 10, recycleBinLimit = 20, recycleSearch = '', recycleUserFilter = 'all', historyDisplayLimit = 30, inactiveUserLimit = 30, adminMoreOpen = false;
   let attendancePageUserFilter = 'all', attendancePageDateFilter = toDateKey(nowDate()), attendancePageShowDeleted = false, attendancePageLimit = 30;
+  let adminProCurrentPageKey = '';
   const TX_SYNC_LIMIT_ADMIN = 800, TX_SYNC_LIMIT_STAFF = 400, ATT_SYNC_LIMIT_ADMIN = 800, ATT_SYNC_LIMIT_STAFF = 400, AUDIT_SYNC_LIMIT = 40, CLOSING_SYNC_LIMIT = 120, MANUAL_BONUS_SYNC_LIMIT = 250, HISTORY_PAGE_STEP = 30, INACTIVE_USER_STEP = 30;
   const ATTENDANCE_PAGE_STEP = 30;
   const DEFAULT_CLOSING_DEADLINE_HOUR = 18, DEFAULT_CLOSING_DEADLINE_MINUTE = 0, DEFAULT_CLOSING_DEADLINE_TIME = '18:00', DEFAULT_CLOSING_BONUS_PER_MINUTE = 100, DEFAULT_TRANSACTION_BONUS_RATE = 0.015;
@@ -3093,6 +3094,7 @@ ${lockedByGlobal ? 'Hanya user ini yang dibuka dari closing global. Bonus closin
     currentPos = null;
     appPageHistoryStack = [];
     appBackNavigating = false;
+    adminProCurrentPageKey = '';
     adminNotifBootstrapped = false;
     adminNotifSeenIds = new Set();
     if (logoutUsername) clearAttendanceCache(logoutUsername);
@@ -7759,7 +7761,14 @@ Masukkan PIN admin:`);
     const titles = {
       attendance:'Performa Absen Staff', manual_bonus:'Tambah Bonus Manual', receipt_text:'Setting Tulisan Struk', header_guide_note:'Catatan Panduan Header', daily_employee:'Kontrol Bonus Khusus User', user_management:'Manajemen User', backup_restore:'Backup, Reset & Restore', deleted_data:'Data Terhapus'
     };
-    currentPage = 'settings';
+    const safeKey = String(key || '').trim();
+    if (!adminProCurrentPageKey) {
+      const last = appPageHistoryStack[appPageHistoryStack.length - 1];
+      if (last !== 'settings') appPageHistoryStack.push('settings');
+      if (appPageHistoryStack.length > 20) appPageHistoryStack = appPageHistoryStack.slice(-20);
+    }
+    adminProCurrentPageKey = safeKey;
+    currentPage = `adminPro:${safeKey}`;
     const content = $('page-content');
     const nav = $('bottom-nav');
     if (nav) nav.style.display = 'flex';
@@ -7773,10 +7782,10 @@ Masukkan PIN admin:`);
             <p class="page-subtitle">Halaman terpisah supaya ringan dan tidak menumpuk.</p>
           </div>
         </div>
-        <div class="page-in s1" style="padding-bottom:96px">${renderAdminProPageBody(key)}</div>
+        <div class="page-in s1" style="padding-bottom:96px">${renderAdminProPageBody(safeKey)}</div>
       </div>`;
-    if (key === 'backup_restore') updateRestoreProStatus();
-    if (key === 'deleted_data' && $('recycle-user-filter')) $('recycle-user-filter').value = recycleUserFilter;
+    if (safeKey === 'backup_restore') updateRestoreProStatus();
+    if (safeKey === 'deleted_data' && $('recycle-user-filter')) $('recycle-user-filter').value = recycleUserFilter;
   }
 
   async function renderSettingsSummary() {
@@ -8085,7 +8094,24 @@ Masukkan PIN admin:`);
         </div>
       </div>`;
     document.body.appendChild(wrap);
-    wrap.addEventListener('click', (e) => { if (e.target === wrap) closeAdminAttendanceModal(); });
+    const sheet = wrap.querySelector('.modal-sheet');
+    const userSelect = wrap.querySelector('#admin-att-user');
+    const blockBackdropClose = () => {
+      wrap.__blockBackdropClose = true;
+      clearTimeout(wrap.__blockBackdropTimer);
+      wrap.__blockBackdropTimer = setTimeout(() => { wrap.__blockBackdropClose = false; }, 900);
+    };
+    if (sheet) {
+      ['click','pointerdown','touchstart','touchend'].forEach(evt => sheet.addEventListener(evt, (ev) => ev.stopPropagation(), { passive: true }));
+    }
+    if (userSelect) {
+      ['pointerdown','touchstart','mousedown','focus','click','change'].forEach(evt => userSelect.addEventListener(evt, blockBackdropClose));
+    }
+    wrap.addEventListener('click', (e) => {
+      if (e.target !== wrap) return;
+      if (wrap.__blockBackdropClose) return;
+      closeAdminAttendanceModal();
+    });
   }
 
   async function saveAdminAttendance(id = '') {
@@ -8238,9 +8264,10 @@ Masukkan PIN admin:`);
 
 
   function handleStaffSwipeStart(e) {
+    staffSwipeStartT = 0;
     if (!currentUser || isAdmin()) return;
     const touch = e.touches && e.touches[0];
-    if (!touch) return;
+    if (!touch || isBackSwipeIgnoredTarget(e.target)) return;
     staffSwipeStartX = touch.clientX;
     staffSwipeStartY = touch.clientY;
     staffSwipeStartT = Date.now();
@@ -8273,6 +8300,12 @@ Masukkan PIN admin:`);
       openModal.style.display = 'none';
       return true;
     }
+    if (String(currentPage || '').startsWith('adminPro:')) {
+      appBackNavigating = true;
+      adminProCurrentPageKey = '';
+      router.navigate('settings').finally(() => { appBackNavigating = false; });
+      return true;
+    }
     let prev = '';
     while (appPageHistoryStack.length) {
       prev = appPageHistoryStack.pop();
@@ -8289,6 +8322,7 @@ Masukkan PIN admin:`);
   }
 
   function handleAppBackSwipeStart(e) {
+    appSwipeStartT = 0;
     const touch = e.touches && e.touches[0];
     if (!touch || isBackSwipeIgnoredTarget(e.target)) return;
     appSwipeStartX = touch.clientX;
@@ -8299,6 +8333,7 @@ Masukkan PIN admin:`);
   function handleAppBackSwipeEnd(e) {
     const touch = e.changedTouches && e.changedTouches[0];
     if (!touch || !appSwipeStartT) return;
+    if (isBackSwipeIgnoredTarget(e.target)) { appSwipeStartT = 0; return; }
     const dx = touch.clientX - appSwipeStartX;
     const dy = touch.clientY - appSwipeStartY;
     const dt = Date.now() - appSwipeStartT;
@@ -8313,11 +8348,12 @@ Masukkan PIN admin:`);
 
   const router = {
     navigate: async (page) => {
-      if (!appBackNavigating && currentPage && currentPage !== page && currentPage !== 'login') {
+      if (!appBackNavigating && currentPage && currentPage !== page && currentPage !== 'login' && RESTORABLE_PAGES.includes(currentPage)) {
         const last = appPageHistoryStack[appPageHistoryStack.length - 1];
         if (last !== currentPage) appPageHistoryStack.push(currentPage);
         if (appPageHistoryStack.length > 20) appPageHistoryStack = appPageHistoryStack.slice(-20);
       }
+      if (RESTORABLE_PAGES.includes(page)) adminProCurrentPageKey = '';
       currentPage = page;
       const content = $('page-content');
       const nav = $('bottom-nav');
