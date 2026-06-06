@@ -763,6 +763,7 @@
     }
     const { error } = await supabase.from(ref.collectionName).upsert({ id: ref.id, data: finalData }, { onConflict: 'id' });
     if (error) throw error;
+    syncLocalCacheAfterWrite(ref.collectionName, ref.id, finalData);
     return ref;
   }
   async function bulkUpsertCompat(collectionName, entries, chunkSize = 200, label = '') {
@@ -806,7 +807,6 @@
     if (unsubManualBonuses) { unsubManualBonuses(); unsubManualBonuses = null; }
     if (unsubRismaManualClosing) { unsubRismaManualClosing(); unsubRismaManualClosing = null; }
     if (unsubHeaderGuideNote) { unsubHeaderGuideNote(); unsubHeaderGuideNote = null; }
-    if (unsubStaffDailyHomeNote) { unsubStaffDailyHomeNote(); unsubStaffDailyHomeNote = null; }
     if (unsubReceiptTextSettings) { unsubReceiptTextSettings(); unsubReceiptTextSettings = null; }
   }
 
@@ -818,6 +818,48 @@
   async function deleteDoc(ref) {
     const { error } = await supabase.from(ref.collectionName).delete().eq('id', ref.id);
     if (error) throw error;
+    syncLocalCacheAfterDelete(ref.collectionName, ref.id);
+  }
+
+  function syncLocalCacheAfterWrite(collectionName, id, data = {}) {
+    try {
+      const rec = { id: String(id || ''), ...(data || {}) };
+      if (!rec.id) return;
+      if (collectionName === 'transactions') {
+        cachedTransactions = sortByCreatedDesc([rec, ...(cachedTransactions || []).filter(t => String(t.id) !== rec.id)]);
+      } else if (collectionName === 'attendance') {
+        upsertAttendanceRecord(rec);
+      } else if (collectionName === 'manualBonuses') {
+        upsertManualBonusRecord(rec);
+      } else if (collectionName === 'users') {
+        upsertCachedUserFromServer(rec.id, rec);
+      } else if (collectionName === 'audit_logs') {
+        cachedAuditLogs = sortByCreatedDesc([rec, ...(cachedAuditLogs || []).filter(l => String(l.id) !== rec.id)]).slice(0, AUDIT_SYNC_LIMIT);
+      } else if (collectionName === 'closings') {
+        if (rec.id === '__bonus_settings') cachedBonusSettings = normalizeBonusSettings(rec);
+        else if (rec.id === HEADER_GUIDE_NOTE_DOC_ID || rec.type === 'header_guide_note') cachedHeaderGuideNote = { id: rec.id, note: DEFAULT_HEADER_GUIDE_NOTE, ...rec };
+        else if (rec.id === RECEIPT_TEXT_DOC_ID || rec.type === 'receipt_text_settings') cachedReceiptTextSettings = normalizeReceiptTextSettings({ id: rec.id, ...rec });
+        else if (rec.id === RISMA_MANUAL_CLOSING_DOC_ID) cachedRismaManualClosingConfig = { id: RISMA_MANUAL_CLOSING_DOC_ID, enabled: true, allowedUsers: [], allowedNames: {}, ...rec };
+        else if (isClosingDataRecord(rec)) cachedClosings = sortByCreatedDesc([rec, ...(cachedClosings || []).filter(c => String(c.id) !== rec.id)]);
+      }
+    } catch (e) {
+      console.warn('Update cache lokal gagal:', e?.message || e);
+    }
+  }
+
+  function syncLocalCacheAfterDelete(collectionName, id) {
+    try {
+      const safeId = String(id || '');
+      if (!safeId) return;
+      if (collectionName === 'transactions') cachedTransactions = (cachedTransactions || []).filter(t => String(t.id) !== safeId);
+      else if (collectionName === 'attendance') cachedAttendance = (cachedAttendance || []).filter(a => String(a.id) !== safeId);
+      else if (collectionName === 'manualBonuses') cachedManualBonuses = (cachedManualBonuses || []).filter(b => String(b.id) !== safeId);
+      else if (collectionName === 'users') cachedUsers = (cachedUsers || []).filter(u => sanitizeUsername(u.username || u.id) !== sanitizeUsername(safeId));
+      else if (collectionName === 'closings') cachedClosings = (cachedClosings || []).filter(c => String(c.id) !== safeId);
+      else if (collectionName === 'audit_logs') cachedAuditLogs = (cachedAuditLogs || []).filter(l => String(l.id) !== safeId);
+    } catch (e) {
+      console.warn('Hapus cache lokal gagal:', e?.message || e);
+    }
   }
   function onSnapshot(refOrQuery, next, errorCb) {
     let stopped = false;
@@ -956,16 +998,15 @@
   let cachedStaffDailyHomeNote = { id: STAFF_DAILY_NOTE_DOC_ID, note: DEFAULT_STAFF_DAILY_NOTE, enabled: true, updatedAtMs: 0, updatedBy: '', updatedByName: '' };
   let cachedReceiptTextSettings = { id: RECEIPT_TEXT_DOC_ID, ...DEFAULT_RECEIPT_TEXT_SETTINGS, updatedAtMs: 0, updatedBy: '', updatedByName: '' };
   let cachedRismaManualClosingConfig = { id: '__risma_manual_closing', enabled: true, allowedUsers: [], allowedNames: {} };
-  let unsubTransactions = null, unsubAttendance = null, unsubUsers = null, unsubAuditLogs = null, unsubClosings = null, unsubBonusSettings = null, unsubManualBonuses = null, unsubRismaManualClosing = null, unsubHeaderGuideNote = null, unsubStaffDailyHomeNote = null, unsubReceiptTextSettings = null, rangeStartDate = null, rangeEndDate = null;
+  let unsubTransactions = null, unsubAttendance = null, unsubUsers = null, unsubAuditLogs = null, unsubClosings = null, unsubBonusSettings = null, unsubManualBonuses = null, unsubRismaManualClosing = null, unsubHeaderGuideNote = null, unsubReceiptTextSettings = null, rangeStartDate = null, rangeEndDate = null;
   let attendanceReady = false, isBusy = false, auditLogLimit = 10, recycleBinLimit = 20, recycleSearch = '', recycleUserFilter = 'all', historyDisplayLimit = 30, inactiveUserLimit = 30, adminMoreOpen = false;
   let attendancePageUserFilter = 'all', attendancePageDateFilter = toDateKey(nowDate()), attendancePageShowDeleted = false, attendancePageLimit = 30;
   let adminProCurrentPageKey = '';
-  const TX_SYNC_LIMIT_ADMIN = 800, TX_SYNC_LIMIT_STAFF = 400, ATT_SYNC_LIMIT_ADMIN = 800, ATT_SYNC_LIMIT_STAFF = 400, AUDIT_SYNC_LIMIT = 40, CLOSING_SYNC_LIMIT = 120, MANUAL_BONUS_SYNC_LIMIT = 250, HISTORY_PAGE_STEP = 30, INACTIVE_USER_STEP = 30;
+  const TX_SYNC_LIMIT_ADMIN = 800, ATT_SYNC_LIMIT_ADMIN = 800, AUDIT_SYNC_LIMIT = 40, CLOSING_SYNC_LIMIT = 120, MANUAL_BONUS_SYNC_LIMIT = 250, HISTORY_PAGE_STEP = 30, INACTIVE_USER_STEP = 30;
   const ATTENDANCE_PAGE_STEP = 30;
   const DEFAULT_CLOSING_DEADLINE_HOUR = 18, DEFAULT_CLOSING_DEADLINE_MINUTE = 0, DEFAULT_CLOSING_DEADLINE_TIME = '18:00', DEFAULT_CLOSING_BONUS_PER_MINUTE = 100, DEFAULT_TRANSACTION_BONUS_RATE = 0.015;
   const RISMA_MANUAL_CLOSING_DOC_ID = '__risma_manual_closing';
   const RISMA_MANUAL_CLOSING_COLLECTION = 'closings';
-  let staffSwipeStartX = 0, staffSwipeStartY = 0, staffSwipeStartT = 0;
   let appSwipeStartX = 0, appSwipeStartY = 0, appSwipeStartT = 0;
   let adminClosingPanelHash = '', adminDashboardPanelsHash = '';
   let clockInInFlight = false;
@@ -1294,47 +1335,6 @@
     if (!ok) showToast(message, true);
     return ok;
   }
-  const getAttendanceCacheKey = (username) => `rocky_attendance_cache_${sanitizeUsername(username)}`;
-  function saveAttendanceCache(username, payload) {
-    if (!username) return;
-    localStorage.setItem(getAttendanceCacheKey(username), JSON.stringify({
-      dateKey: payload?.dateKey || toDateKey(nowDate()),
-      createdAtMs: Number(payload?.createdAtMs || Date.now()),
-      cachedAt: Date.now()
-    }));
-  }
-  function readAttendanceCache(username) {
-    if (!username) return null;
-    try {
-      const raw = localStorage.getItem(getAttendanceCacheKey(username));
-      if (!raw) return null;
-      const parsed = JSON.parse(raw);
-      if (!parsed || parsed.dateKey !== toDateKey(nowDate())) return null;
-      return parsed;
-    } catch (e) { return null; }
-  }
-  function clearAttendanceCache(username) {
-    if (!username) return;
-    localStorage.removeItem(getAttendanceCacheKey(username));
-  }
-  function preloadAttendanceCache() {
-    if (!currentUser || isAdmin()) return false;
-    const cached = readAttendanceCache(currentUser.username);
-    if (!cached) return false;
-    const exists = cachedAttendance.some(a => a.__cached && a.dateKey === cached.dateKey && a.user === currentUser.username);
-    if (!exists) {
-      cachedAttendance = [{
-        id: `cached_${currentUser.username}_${cached.dateKey}`,
-        user: sanitizeUsername(currentUser.username),
-        name: currentUser.name,
-        dateKey: cached.dateKey,
-        createdAtMs: cached.createdAtMs || Date.now(),
-        __cached: true
-      }, ...cachedAttendance.filter(a => !a.__cached)];
-    }
-    attendanceReady = false;
-    return true;
-  }
   function stripCachedAttendance() {
     cachedAttendance = cachedAttendance.filter(a => !a.__cached);
   }
@@ -1387,47 +1387,6 @@
     if (!rec) return;
     cachedManualBonuses = dedupeManualBonusRecords([rec, ...(cachedManualBonuses || [])]);
   }
-
-  async function findExistingAttendanceToday(username, dateKey = toDateKey(nowDate())) {
-    const user = sanitizeUsername(username);
-    if (!user || !dateKey) return null;
-
-    try {
-      const snap = await getDocFromServer(doc(db, 'attendance', getAttendanceDocId(user, dateKey)));
-      if (snap.exists()) {
-        const rec = { id: snap.id, ...snap.data() };
-        if (!isRecordDeleted(rec)) return rec;
-      }
-    } catch (e) {
-      console.warn('Cek absen by doc id gagal:', e?.message || e);
-    }
-
-    try {
-      const q = query(collection(db, 'attendance'), where('user', '==', user), where('dateKey', '==', dateKey), limit(1));
-      const snap = await getDocs(q);
-      const rec = snap.docs.map(d => ({ id: d.id, ...d.data() })).find(a => !isRecordDeleted(a));
-      return rec || null;
-    } catch (e) {
-      console.warn('Cek absen legacy gagal:', e?.message || e);
-      return null;
-    }
-  }
-
-  async function syncTodayAttendanceFromServer() {
-    if (!currentUser || isAdmin()) return null;
-    const user = sanitizeUsername(currentUser.username);
-    const todayKey = toDateKey(nowDate());
-    const rec = await findExistingAttendanceToday(user, todayKey);
-    if (rec) {
-      const createdAtMs = getRecordTimeMs(rec) || Number(rec.createdAtMs || Date.now());
-      saveAttendanceCache(user, { dateKey: todayKey, createdAtMs });
-      upsertAttendanceRecord({ ...rec, user, name: rec.name || currentUser.name, dateKey: todayKey, createdAtMs });
-      attendanceReady = true;
-      refreshCurrentPage();
-    }
-    return rec;
-  }
-
 
   function safeRestoreDocId(raw) {
     const cleaned = String(raw || '')
@@ -1491,7 +1450,7 @@
     }
   }
 
-  const getRoleLabel = () => currentUser ? getRoleDisplayName(currentUser.role || 'staff') : (isAdmin() ? 'Admin' : 'Staff');
+  const getRoleLabel = () => 'Admin';
   function getUserOptionsHtml(includeAll = true) {
     const opts = activeUsers().map(u => `<option value="${escapeHtml(u.username)}">${escapeHtml(u.name)} (@${escapeHtml(u.username)})</option>`).join('');
     return `${includeAll ? '<option value="all">Semua User</option>' : ''}${opts}`;
@@ -1528,8 +1487,8 @@
     const selected = sanitizeUsername(selectedUsername || currentUser?.username || '');
     select.innerHTML = getTransactionUserOptionsHtml(selected);
     if (selected) select.value = selected;
-    select.disabled = !isAdmin();
-    select.style.opacity = select.disabled ? '.72' : '';
+    select.disabled = false;
+    select.style.opacity = '';
   }
   function getSelectedTransactionUser(fallbackUsername = '') {
     const selected = sanitizeUsername($('modal-pos-user')?.value || fallbackUsername || currentUser?.username || '');
@@ -1551,7 +1510,7 @@
     return cachedUsers.find(u => sanitizeUsername(u.username) === sanitizeUsername(username)) || null;
   }
   function getUserDataScopeLabel() {
-    return isAdmin() ? getSelectedUserLabel() : 'Data Saya';
+    return getSelectedUserLabel();
   }
   function isRecordDeleted(rec) {
     return !!rec && (rec.deleted === true || rec.deleted === 'true');
@@ -1631,12 +1590,7 @@
     }
   }
   function getVisibleTransactions() {
-    const visible = cachedTransactions.filter(t => !isRecordDeleted(t));
-    if (!isAdmin() && currentUser?.username) {
-      const me = sanitizeUsername(currentUser.username);
-      return visible.filter(t => sanitizeUsername(t.user) === me);
-    }
-    return visible;
+    return cachedTransactions.filter(t => !isRecordDeleted(t));
   }
   function getVisibleAttendance() {
     return cachedAttendance.filter(a => !isRecordDeleted(a));
@@ -1662,21 +1616,25 @@
     recycleSearch = String(value || '');
     recycleBinLimit = 20;
     renderSettingsSummary();
+    refreshCurrentPage();
   }
   function setRecycleUserFilter(value) {
     recycleUserFilter = value || 'all';
     recycleBinLimit = 20;
     renderSettingsSummary();
+    refreshCurrentPage();
   }
   function resetRecycleFilters() {
     recycleSearch = '';
     recycleUserFilter = 'all';
     recycleBinLimit = 20;
     renderSettingsSummary();
+    refreshCurrentPage();
   }
   function increaseRecycleBinLimit() {
     recycleBinLimit += 20;
     renderSettingsSummary();
+    refreshCurrentPage();
   }
   function resetHistoryDisplayLimit() {
     historyDisplayLimit = HISTORY_PAGE_STEP;
@@ -1786,8 +1744,7 @@
     const board = $('admin-dashboard-panels');
     if (!board) return;
     const stats = getAdminDashboardData();
-    const noteHash = `${cachedStaffDailyHomeNote?.enabled === false ? '0' : '1'}|${cachedStaffDailyHomeNote?.updatedAtMs || 0}|${String(cachedStaffDailyHomeNote?.note || '').slice(0, 120)}`;
-    const hash = `${stats.activeToday}|${stats.userCount}|${noteHash}`;
+    const hash = `${stats.activeToday}|${stats.userCount}`;
     if (hash === adminDashboardPanelsHash && board.innerHTML.trim()) return;
     adminDashboardPanelsHash = hash;
     board.innerHTML = `
@@ -1795,7 +1752,6 @@
         <div class="card" style="padding:10px 11px"><p class="label-xs" style="margin-bottom:5px;font-size:9px">User Aktif Hari Ini</p><p style="font-family:var(--num-font);font-size:18px;font-weight:850;color:var(--green);line-height:1">${stats.activeToday}</p></div>
         <div class="card" style="padding:10px 11px"><p class="label-xs" style="margin-bottom:5px;font-size:9px">User Sistem</p><p style="font-family:var(--num-font);font-size:18px;font-weight:850;color:var(--accent);line-height:1">${stats.userCount}</p></div>
       </div>
-      ${renderStaffDailyHomeNoteHomeCard()}
       <button onclick="router.navigate('report')" class="btn btn-glass page-in s4" style="width:100%;padding:10px 12px;font-size:12px;margin-bottom:8px"><i class="fas fa-ranking-star"></i> Lihat Ranking Omzet di Global</button>
 `;
   }
@@ -3175,7 +3131,7 @@ ${lockedByGlobal ? 'Hanya user ini yang dibuka dari closing global. Bonus closin
       if (!isUserActive(user)) throw new Error('User nonaktif. Hubungi admin.');
       if (String(user.pin || '') !== pin) throw new Error('PIN salah');
       if (!isAdminAccount(user, username)) throw new Error('Akses ditolak. Aplikasi ini khusus admin.');
-      currentUser = { username: sanitizeUsername(user.username || username), name: user.name, role: user.role || 'staff', transactionBonusRate: user.transactionBonusRate ?? (isDailyRole(user.role || 'staff') ? user.dailyBonusRate : null), transactionBonusPercent: user.transactionBonusPercent ?? (isDailyRole(user.role || 'staff') ? user.dailyBonusPercent : null), closingBonusPerMinute: user.closingBonusPerMinute ?? null, dailyBonusRate: Number(user.dailyBonusRate || 0), dailyBonusPercent: Number(user.dailyBonusPercent || 0), active: isUserActive(user), deleted: false };
+      currentUser = { username: sanitizeUsername(user.username || username), name: user.name || username, role: 'admin', transactionBonusRate: user.transactionBonusRate ?? null, transactionBonusPercent: user.transactionBonusPercent ?? null, closingBonusPerMinute: user.closingBonusPerMinute ?? null, dailyBonusRate: Number(user.dailyBonusRate || 0), dailyBonusPercent: Number(user.dailyBonusPercent || 0), active: isUserActive(user), deleted: false };
       cachedTransactions = [];
       cachedAttendance = [];
       cachedAuditLogs = [];
@@ -3183,9 +3139,7 @@ ${lockedByGlobal ? 'Hanya user ini yang dibuka dari closing global. Bonus closin
       cachedManualBonuses = [];
       cachedRismaManualClosingConfig = { id: RISMA_MANUAL_CLOSING_DOC_ID, enabled: true, allowedUsers: [], allowedNames: {} };
       cachedHeaderGuideNote = { id: HEADER_GUIDE_NOTE_DOC_ID, note: DEFAULT_HEADER_GUIDE_NOTE, updatedAtMs: 0, updatedBy: '', updatedByName: '' };
-      cachedStaffDailyHomeNote = { id: STAFF_DAILY_NOTE_DOC_ID, note: DEFAULT_STAFF_DAILY_NOTE, enabled: true, updatedAtMs: 0, updatedBy: '', updatedByName: '' };
     cachedReceiptTextSettings = { id: RECEIPT_TEXT_DOC_ID, ...DEFAULT_RECEIPT_TEXT_SETTINGS, updatedAtMs: 0, updatedBy: '', updatedByName: '' };
-      preloadAttendanceCache();
       persistCurrentSession();
       try { localStorage.setItem(PAGE_KEY, 'home'); } catch (_) {}
       bindRealtimeData();
@@ -3212,7 +3166,6 @@ ${lockedByGlobal ? 'Hanya user ini yang dibuka dari closing global. Bonus closin
     adminProCurrentPageKey = '';
     adminNotifBootstrapped = false;
     adminNotifSeenIds = new Set();
-    if (logoutUsername) clearAttendanceCache(logoutUsername);
     cachedTransactions = [];
     cachedAttendance = [];
     cachedUsers = [];
@@ -3221,7 +3174,6 @@ ${lockedByGlobal ? 'Hanya user ini yang dibuka dari closing global. Bonus closin
     cachedManualBonuses = [];
     cachedRismaManualClosingConfig = { id: RISMA_MANUAL_CLOSING_DOC_ID, enabled: true, allowedUsers: [], allowedNames: {} };
     cachedHeaderGuideNote = { id: HEADER_GUIDE_NOTE_DOC_ID, note: DEFAULT_HEADER_GUIDE_NOTE, updatedAtMs: 0, updatedBy: '', updatedByName: '' };
-      cachedStaffDailyHomeNote = { id: STAFF_DAILY_NOTE_DOC_ID, note: DEFAULT_STAFF_DAILY_NOTE, enabled: true, updatedAtMs: 0, updatedBy: '', updatedByName: '' };
     cachedReceiptTextSettings = { id: RECEIPT_TEXT_DOC_ID, ...DEFAULT_RECEIPT_TEXT_SETTINGS, updatedAtMs: 0, updatedBy: '', updatedByName: '' };
     cachedBonusSettings = getDefaultBonusSettings();
     attendanceReady = false;
@@ -3250,9 +3202,9 @@ ${lockedByGlobal ? 'Hanya user ini yang dibuka dari closing global. Bonus closin
       currentUser = toSessionUser({
         username: sanitizeUsername(user.username || username),
         name: user.name || savedUser.name || username,
-        role: user.role || savedUser.role || 'admin',
-        transactionBonusRate: user.transactionBonusRate ?? (isDailyRole(user.role || 'staff') ? user.dailyBonusRate : savedUser.transactionBonusRate ?? null),
-        transactionBonusPercent: user.transactionBonusPercent ?? (isDailyRole(user.role || 'staff') ? user.dailyBonusPercent : savedUser.transactionBonusPercent ?? null),
+        role: 'admin',
+        transactionBonusRate: user.transactionBonusRate ?? savedUser.transactionBonusRate ?? null,
+        transactionBonusPercent: user.transactionBonusPercent ?? savedUser.transactionBonusPercent ?? null,
         closingBonusPerMinute: user.closingBonusPerMinute ?? savedUser.closingBonusPerMinute ?? null,
         dailyBonusRate: Number(user.dailyBonusRate || savedUser.dailyBonusRate || 0),
         dailyBonusPercent: Number(user.dailyBonusPercent || savedUser.dailyBonusPercent || 0),
@@ -3267,9 +3219,7 @@ ${lockedByGlobal ? 'Hanya user ini yang dibuka dari closing global. Bonus closin
       cachedManualBonuses = [];
       cachedRismaManualClosingConfig = { id: RISMA_MANUAL_CLOSING_DOC_ID, enabled: true, allowedUsers: [], allowedNames: {} };
       cachedHeaderGuideNote = { id: HEADER_GUIDE_NOTE_DOC_ID, note: DEFAULT_HEADER_GUIDE_NOTE, updatedAtMs: 0, updatedBy: '', updatedByName: '' };
-      cachedStaffDailyHomeNote = { id: STAFF_DAILY_NOTE_DOC_ID, note: DEFAULT_STAFF_DAILY_NOTE, enabled: true, updatedAtMs: 0, updatedBy: '', updatedByName: '' };
     cachedReceiptTextSettings = { id: RECEIPT_TEXT_DOC_ID, ...DEFAULT_RECEIPT_TEXT_SETTINGS, updatedAtMs: 0, updatedBy: '', updatedByName: '' };
-      preloadAttendanceCache();
       bindRealtimeData();
       adminNotifBootstrapped = false;
       initAdminWebPush();
@@ -3286,15 +3236,9 @@ ${lockedByGlobal ? 'Hanya user ini yang dibuka dari closing global. Bonus closin
   function bindRealtimeData() {
     if (!currentUser) return;
     attendanceReady = false;
-    preloadAttendanceCache();
     stopRealtimeData();
 
-    // Jangan pakai orderBy('createdAt') di query staff karena data lama/migrasi
-    // bisa belum konsisten field createdAt-nya. Itu bikin transaksi staff kadang
-    // kosong setelah clear cache/data, padahal admin masih bisa lihat.
-    const tq = isAdmin()
-      ? query(collection(db, 'transactions'), limit(TX_SYNC_LIMIT_ADMIN))
-      : query(collection(db, 'transactions'), where('user', '==', sanitizeUsername(currentUser.username)), limit(TX_SYNC_LIMIT_STAFF));
+    const tq = query(collection(db, 'transactions'), limit(TX_SYNC_LIMIT_ADMIN));
     unsubTransactions = onSnapshot(tq, (snap) => {
       cachedTransactions = sortByCreatedDesc(
         snap.docs.map(d => ({ id: d.id, ...d.data() }))
@@ -3304,9 +3248,7 @@ ${lockedByGlobal ? 'Hanya user ini yang dibuka dari closing global. Bonus closin
     }, async (err) => {
       console.error(err);
       try {
-        const fallbackQ = isAdmin()
-          ? query(collection(db, 'transactions'), limit(TX_SYNC_LIMIT_ADMIN))
-          : query(collection(db, 'transactions'), where('user', '==', sanitizeUsername(currentUser.username)), limit(TX_SYNC_LIMIT_STAFF));
+        const fallbackQ = query(collection(db, 'transactions'), limit(TX_SYNC_LIMIT_ADMIN));
         const fallbackSnap = await getDocs(fallbackQ);
         cachedTransactions = sortByCreatedDesc(
           fallbackSnap.docs.map(d => ({ id: d.id, ...d.data() }))
@@ -3317,30 +3259,15 @@ ${lockedByGlobal ? 'Hanya user ini yang dibuka dari closing global. Bonus closin
       }
     });
 
-    const aq = isAdmin()
-      ? query(collection(db, 'attendance'), limit(ATT_SYNC_LIMIT_ADMIN))
-      : query(collection(db, 'attendance'), where('user', '==', sanitizeUsername(currentUser.username)), limit(ATT_SYNC_LIMIT_STAFF));
+    const aq = query(collection(db, 'attendance'), limit(ATT_SYNC_LIMIT_ADMIN));
     unsubAttendance = onSnapshot(aq, (snap) => {
       stripCachedAttendance();
       cachedAttendance = dedupeAttendanceRecords(
         snap.docs.map(d => ({ id: d.id, ...d.data() }))
       );
-      if (!isAdmin()) {
-        const today = toDateKey(nowDate());
-        const todayRec = cachedAttendance.find(a => !isRecordDeleted(a) && extractDateKey(a) === today && sanitizeUsername(a.user) === currentUser.username);
-        if (todayRec) {
-          const createdAtMs = getRecordTimeMs(todayRec) || Date.now();
-          saveAttendanceCache(currentUser.username, { dateKey: today, createdAtMs });
-        } else {
-          clearAttendanceCache(currentUser.username);
-        }
-      }
       attendanceReady = true;
       refreshCurrentPage();
-      if (!isAdmin() && !hasClockedInToday()) syncTodayAttendanceFromServer();
-    }, (err) => { attendanceReady = true; console.error(err); refreshCurrentPage(); if (!isAdmin()) syncTodayAttendanceFromServer(); });
-
-    if (!isAdmin()) syncTodayAttendanceFromServer();
+    }, (err) => { attendanceReady = true; console.error(err); refreshCurrentPage(); });
 
     const cq = query(collection(db, 'closings'), limit(CLOSING_SYNC_LIMIT));
     unsubClosings = onSnapshot(cq, (snap) => {
@@ -3368,13 +3295,6 @@ ${lockedByGlobal ? 'Hanya user ini yang dibuka dari closing global. Bonus closin
       refreshCurrentPage();
     }, (err) => console.error('Catatan Panduan Icon Header listener gagal:', err));
 
-    unsubStaffDailyHomeNote = onSnapshot(doc(db, 'closings', STAFF_DAILY_NOTE_DOC_ID), (snap) => {
-      cachedStaffDailyHomeNote = snap.exists()
-        ? { id: snap.id, note: DEFAULT_STAFF_DAILY_NOTE, enabled: true, ...(snap.data() || {}) }
-        : { id: STAFF_DAILY_NOTE_DOC_ID, note: DEFAULT_STAFF_DAILY_NOTE, enabled: true, updatedAtMs: 0, updatedBy: '', updatedByName: '' };
-      refreshCurrentPage();
-    }, (err) => console.error('Catatan home staff/harian listener gagal:', err));
-
     unsubReceiptTextSettings = onSnapshot(doc(db, 'closings', RECEIPT_TEXT_DOC_ID), (snap) => {
       cachedReceiptTextSettings = snap.exists()
         ? normalizeReceiptTextSettings({ id: snap.id, ...(snap.data() || {}) })
@@ -3382,9 +3302,7 @@ ${lockedByGlobal ? 'Hanya user ini yang dibuka dari closing global. Bonus closin
       refreshCurrentPage();
     }, (err) => console.error('Setting tulisan struk listener gagal:', err));
 
-    const mbq = isAdmin()
-      ? query(collection(db, 'manualBonuses'), limit(MANUAL_BONUS_SYNC_LIMIT))
-      : query(collection(db, 'manualBonuses'), where('user', '==', sanitizeUsername(currentUser.username)), limit(MANUAL_BONUS_SYNC_LIMIT));
+    const mbq = query(collection(db, 'manualBonuses'), limit(MANUAL_BONUS_SYNC_LIMIT));
     unsubManualBonuses = onSnapshot(mbq, (snap) => {
       cachedManualBonuses = dedupeManualBonusRecords(
         snap.docs.map(d => ({ id: d.id, ...d.data() }))
@@ -3392,29 +3310,24 @@ ${lockedByGlobal ? 'Hanya user ini yang dibuka dari closing global. Bonus closin
       refreshCurrentPage();
     }, (err) => console.error('Manual bonus listener gagal:', err));
 
-    if (isAdmin()) {
-      const uq = query(collection(db, 'users'), orderBy('name'));
-      unsubUsers = onSnapshot(uq, (snap) => {
-        cachedUsers = snap.docs.map(d => ({ id: d.id, ...d.data() }));
-        refreshCurrentPage();
-      }, (err) => console.error(err));
+    const uq = query(collection(db, 'users'), orderBy('name'));
+    unsubUsers = onSnapshot(uq, (snap) => {
+      cachedUsers = snap.docs.map(d => ({ id: d.id, ...d.data() }));
+      refreshCurrentPage();
+    }, (err) => console.error(err));
 
-      unsubRismaManualClosing = onSnapshot(doc(db, RISMA_MANUAL_CLOSING_COLLECTION, RISMA_MANUAL_CLOSING_DOC_ID), (snap) => {
-        cachedRismaManualClosingConfig = snap.exists()
-          ? { id: snap.id, enabled: true, allowedUsers: [], allowedNames: {}, ...(snap.data() || {}) }
-          : { id: RISMA_MANUAL_CLOSING_DOC_ID, enabled: true, allowedUsers: [], allowedNames: {} };
-        refreshCurrentPage();
-      }, (err) => console.error('Closing manual Risma listener gagal:', err));
+    unsubRismaManualClosing = onSnapshot(doc(db, RISMA_MANUAL_CLOSING_COLLECTION, RISMA_MANUAL_CLOSING_DOC_ID), (snap) => {
+      cachedRismaManualClosingConfig = snap.exists()
+        ? { id: snap.id, enabled: true, allowedUsers: [], allowedNames: {}, ...(snap.data() || {}) }
+        : { id: RISMA_MANUAL_CLOSING_DOC_ID, enabled: true, allowedUsers: [], allowedNames: {} };
+      refreshCurrentPage();
+    }, (err) => console.error('Closing manual Risma listener gagal:', err));
 
-      const lq = query(collection(db, 'audit_logs'), orderBy('createdAt', 'desc'), limit(AUDIT_SYNC_LIMIT));
-      unsubAuditLogs = onSnapshot(lq, (snap) => {
-        cachedAuditLogs = sortByCreatedDesc(snap.docs.map(d => ({ id: d.id, ...d.data() })));
-        refreshCurrentPage();
-      }, (err) => console.error(err));
-    } else {
-      cachedUsers = currentUser ? [{ username: currentUser.username, name: currentUser.name, role: currentUser.role || 'staff', transactionBonusRate: currentUser.transactionBonusRate ?? null, transactionBonusPercent: currentUser.transactionBonusPercent ?? null, closingBonusPerMinute: currentUser.closingBonusPerMinute ?? null, dailyBonusRate: Number(currentUser.dailyBonusRate || 0), dailyBonusPercent: Number(currentUser.dailyBonusPercent || 0), active: true }] : [];
-      cachedAuditLogs = [];
-    }
+    const lq = query(collection(db, 'audit_logs'), orderBy('createdAt', 'desc'), limit(AUDIT_SYNC_LIMIT));
+    unsubAuditLogs = onSnapshot(lq, (snap) => {
+      cachedAuditLogs = sortByCreatedDesc(snap.docs.map(d => ({ id: d.id, ...d.data() })));
+      refreshCurrentPage();
+    }, (err) => console.error(err));
 
     applyNavRoleLabels();
   }
@@ -3429,10 +3342,26 @@ ${lockedByGlobal ? 'Hanya user ini yang dibuka dari closing global. Bonus closin
     return !!summary && summary.contains(active);
   }
 
+  function isAdminProFormBeingEdited() {
+    if (!String(currentPage || '').startsWith('adminPro:')) return false;
+    const active = document.activeElement;
+    if (!active) return false;
+    const tag = String(active.tagName || '').toLowerCase();
+    if (!['input','textarea','select'].includes(tag)) return false;
+    const content = $('page-content');
+    return !!content && content.contains(active);
+  }
+
+  function renderCurrentAdminProPage() {
+    const key = String(adminProCurrentPageKey || String(currentPage || '').split(':')[1] || '').trim();
+    if (!key) return;
+    openAdminProPage(key);
+  }
+
   async function refreshCurrentPage() {
     if (!currentUser) return;
     if (currentPage === 'home') { await updateHomeStatus(); await updateHomeStats(); }
-    else if (currentPage === 'history') { if (isAdmin()) await renderHistory(); else renderStaffTodayHistoryPage(); }
+    else if (currentPage === 'history') await renderHistory();
     else if (currentPage === 'attendance') renderAttendanceAdminPage();
     else if (currentPage === 'report') await renderReport();
     else if (currentPage === 'closing') renderAdminClosingPanelMaybe();
@@ -3440,26 +3369,16 @@ ${lockedByGlobal ? 'Hanya user ini yang dibuka dari closing global. Bonus closin
       // Supabase compat layer melakukan polling realtime. Saat admin sedang mengetik form,
       // polling dapat memanggil renderSettingsSummary() dan menimpa innerHTML, sehingga kolom
       // yang sedang diisi terlihat hilang/kosong. Jangan refresh panel settings selama ada input aktif.
-      if (!isSettingsFormBeingEdited()) await renderSettingsSummary();
+      if (isBusy || !isSettingsFormBeingEdited()) await renderSettingsSummary();
+    }
+    else if (String(currentPage || '').startsWith('adminPro:')) {
+      if (isBusy || !isAdminProFormBeingEdited()) renderCurrentAdminProPage();
     }
     else if (currentPage === 'adminLogs') renderAdminLogsPage();
   }
 
-  function hasClockedInToday() {
-    const today = toDateKey(nowDate());
-    const me = sanitizeUsername(currentUser?.username || '');
-    return cachedAttendance.some(a => !isRecordDeleted(a) && extractDateKey(a) === today && (!me || sanitizeUsername(a.user) === me));
-  }
   function canTransactNow() {
-    if (isAdmin()) return true;
-    if (isTransactionsClosedToday()) return false;
-    if (isDailyEmployee(currentUser)) return true;
-    if (!attendanceReady) return false;
-    return hasClockedInToday();
-  }
-  function getTodayAttendanceRecord() {
-    const today = toDateKey(nowDate());
-    return sortByCreatedDesc(cachedAttendance.filter(a => !isRecordDeleted(a) && extractDateKey(a) === today))[0] || null;
+    return isAdmin();
   }
 
   function getHeaderGuideNoteText() {
@@ -3733,132 +3652,6 @@ ${lockedByGlobal ? 'Hanya user ini yang dibuka dari closing global. Bonus closin
     setLoading(false);
   }
 
-  function renderStaffDailyHomeNotePublicCard() {
-    if (!currentUser || isAdmin() || cachedStaffDailyHomeNote?.enabled === false) return '';
-    const note = getStaffDailyHomeNoteText();
-    const updatedAtMs = Number(cachedStaffDailyHomeNote?.updatedAtMs || 0);
-    const updatedText = updatedAtMs ? new Date(updatedAtMs).toLocaleString('id-ID', { dateStyle: 'medium', timeStyle: 'short' }) : 'Catatan aktif';
-    return `
-      <div class="card staff-daily-public-card page-in s1">
-        <div class="staff-daily-public-inner">
-          <div class="staff-daily-status-head">
-            <div class="staff-daily-avatar"><i class="fas fa-bullhorn"></i></div>
-            <div style="min-width:0;flex:1">
-              <div class="staff-daily-status-name">Catatan Home</div>
-              <div class="staff-daily-status-meta">Untuk Staff & Harian · ${escapeHtml(updatedText)}</div>
-            </div>
-            <span class="status-pill status-ok" style="font-size:9px;padding:4px 7px">Aktif</span>
-          </div>
-          <div class="staff-daily-public-text">${renderStaffDailyNoteLinks(note)}</div>
-        </div>
-      </div>`;
-  }
-
-  function renderStaffDailyHomeNoteControlBody() {
-    const note = getStaffDailyHomeNoteText();
-    const enabled = cachedStaffDailyHomeNote?.enabled !== false;
-    const updatedBy = cachedStaffDailyHomeNote?.updatedByName || cachedStaffDailyHomeNote?.updatedBy || '-';
-    const updatedAtMs = Number(cachedStaffDailyHomeNote?.updatedAtMs || 0);
-    const updatedText = updatedAtMs ? new Date(updatedAtMs).toLocaleString('id-ID', { dateStyle: 'medium', timeStyle: 'short' }) : 'Default aplikasi';
-    const countText = `${String(note || '').length}/320`;
-    return `
-      <div class="staff-daily-status-editor">
-        <div class="staff-daily-status-head">
-          <div class="staff-daily-avatar"><i class="fas fa-note-sticky"></i></div>
-          <div style="min-width:0;flex:1">
-            <div class="staff-daily-status-name">Catatan Home Staff & Harian</div>
-            <div class="staff-daily-status-meta">Update: ${escapeHtml(updatedText)} · ${escapeHtml(updatedBy)}</div>
-          </div>
-          <label class="staff-daily-status-toggle" title="Aktif / nonaktif card catatan di home staff dan harian">
-            <input id="staff-daily-note-enabled" type="checkbox" ${enabled ? 'checked' : ''} onchange="updateStaffDailyNoteLivePreview()">
-            <span>Aktif</span>
-          </label>
-        </div>
-        <div class="staff-daily-composer">
-          <textarea id="staff-daily-note-input" maxlength="320" rows="4" placeholder="Tulis catatan atau tempel link update/download untuk staff dan karyawan harian..." oninput="updateStaffDailyNoteLivePreview()">${escapeHtml(note)}</textarea>
-          <div class="staff-daily-composer-foot">
-            <span style="font-size:10.5px;color:var(--text-soft);line-height:1.35"><i class="fas fa-house"></i> Tampil di halaman utama staff & harian · link otomatis bisa diklik</span>
-            <span id="staff-daily-note-count" class="staff-daily-note-count">${escapeHtml(countText)}</span>
-          </div>
-        </div>
-        <div id="staff-daily-note-live-preview" class="staff-daily-preview-wrap ${enabled ? '' : 'off'}">
-          <div class="staff-daily-preview-title"><i class="fas ${enabled ? 'fa-eye' : 'fa-eye-slash'}"></i> Preview Home</div>
-          <div class="staff-daily-preview-text">${enabled ? renderStaffDailyNoteLinks(note) : 'Card catatan sedang nonaktif dan tidak tampil di halaman utama.'}</div>
-        </div>
-        <div class="staff-daily-actions">
-          <span style="font-size:10.5px;color:var(--text-soft);line-height:1.35">Logika simpan, default, dan on/off tetap sama.</span>
-          <div style="display:flex;gap:7px;flex-wrap:wrap">
-            <button onclick="resetStaffDailyHomeNoteInput()" class="btn btn-glass"><i class="fas fa-rotate-left"></i> Default</button>
-            <button onclick="saveStaffDailyHomeNote()" class="btn btn-primary"><i class="fas fa-paper-plane"></i> Update Status</button>
-          </div>
-        </div>
-      </div>`;
-  }
-
-  function renderStaffDailyHomeNoteHomeCard() {
-    if (!isAdmin()) return '';
-    return `<div class="card staff-daily-status-card page-in s4">${renderStaffDailyHomeNoteControlBody()}</div>`;
-  }
-
-  function updateStaffDailyNoteLivePreview() {
-    const input = $('staff-daily-note-input');
-    const check = $('staff-daily-note-enabled');
-    const preview = $('staff-daily-note-live-preview');
-    const count = $('staff-daily-note-count');
-    const value = String(input?.value || '');
-    const note = value.trim();
-    const enabled = check?.checked !== false;
-    if (count) count.textContent = `${value.length}/320`;
-    if (preview) {
-      preview.classList.toggle('off', !enabled);
-      preview.innerHTML = enabled
-        ? `<div class="staff-daily-preview-title"><i class="fas fa-eye"></i> Preview Home</div><div class="staff-daily-preview-text">${renderStaffDailyNoteLinks(note || DEFAULT_STAFF_DAILY_NOTE)}</div>`
-        : `<div class="staff-daily-preview-title"><i class="fas fa-eye-slash"></i> Preview Home</div><div class="staff-daily-preview-text">Card catatan sedang nonaktif dan tidak tampil di halaman utama.</div>`;
-    }
-  }
-
-  async function saveStaffDailyHomeNote() {
-    if (!isAdmin()) return showToast('Hanya admin!', true);
-    if (isBusy) return showToast('Tunggu proses selesai', true);
-    const note = String($('staff-daily-note-input')?.value || '').trim();
-    const enabled = $('staff-daily-note-enabled')?.checked !== false;
-    if (enabled && !note) return showToast('Catatan tidak boleh kosong saat aktif', true);
-    if (note.length > 320) return showToast('Catatan maksimal 320 karakter', true);
-    const pin = await askPin('Simpan catatan Home Staff & Harian?\nMasukkan PIN admin:');
-    if (!pin) return;
-    if (!(await requireCurrentAdminPin(pin, 'PIN admin salah!'))) return;
-    setLoading(true);
-    try {
-      const payload = {
-        id: STAFF_DAILY_NOTE_DOC_ID,
-        type: 'staff_daily_home_note',
-        note: note || DEFAULT_STAFF_DAILY_NOTE,
-        enabled,
-        updatedAt: serverTimestamp(),
-        updatedAtMs: Date.now(),
-        updatedBy: currentUser.username,
-        updatedByName: currentUser.name
-      };
-      await setDoc(doc(db, 'closings', STAFF_DAILY_NOTE_DOC_ID), payload, { merge: true });
-      cachedStaffDailyHomeNote = { ...cachedStaffDailyHomeNote, ...payload };
-      await logAudit('staff_daily_home_note_update', { enabled, note: payload.note });
-      showToast('✓ Catatan home staff/harian disimpan');
-      await refreshCurrentPage();
-    } catch (e) {
-      console.error(e);
-      showToast('Gagal simpan catatan home staff/harian', true);
-    }
-    setLoading(false);
-  }
-
-  function resetStaffDailyHomeNoteInput() {
-    const input = $('staff-daily-note-input');
-    if (input) input.value = DEFAULT_STAFF_DAILY_NOTE;
-    const check = $('staff-daily-note-enabled');
-    if (check) check.checked = true;
-    updateStaffDailyNoteLivePreview();
-  }
-
   function updateLocation() {
     const info = $('loc-info'); if (!info) return;
     info.innerHTML = `<span class="loc-chip loc-loading"><i class="fas fa-circle-notch fa-spin" style="font-size:10px"></i> Mencari GPS...</span>`;
@@ -3875,69 +3668,6 @@ ${lockedByGlobal ? 'Hanya user ini yang dibuka dari closing global. Bonus closin
     }, () => {
       info.innerHTML = `<span class="loc-chip loc-out"><i class="fas fa-triangle-exclamation"></i> Gagal ambil lokasi</span>`;
     }, { enableHighAccuracy:true, timeout:10000, maximumAge:30000 });
-  }
-
-  async function handleClockIn() {
-    if (isBusy || clockInInFlight) return;
-    if (!currentUser) return;
-    if (hasClockedInToday()) return showToast('Sudah absen hari ini!');
-    if (!currentPos) return showToast('Tunggu lokasi!', true);
-
-    const user = sanitizeUsername(currentUser.username);
-    const todayKey = toDateKey(nowDate());
-    const dist = calculateDistance(currentPos.lat, currentPos.lng, OFFICE_LOC.lat, OFFICE_LOC.lng);
-    if (dist > RADIUS_LIMIT) return showToast(`Di luar radius (${Math.round(dist)}m)`, true);
-
-    clockInInFlight = true;
-    setLoading(true);
-    try {
-      const existing = await findExistingAttendanceToday(user, todayKey);
-      if (existing) {
-        const createdAtMs = getRecordTimeMs(existing) || Number(existing.createdAtMs || Date.now());
-        saveAttendanceCache(user, { dateKey: todayKey, createdAtMs });
-        upsertAttendanceRecord({ ...existing, user, name: existing.name || currentUser.name, dateKey: todayKey, createdAtMs });
-        attendanceReady = true;
-        refreshCurrentPage();
-        showToast('Sudah absen hari ini!');
-        return;
-      }
-
-      const nowMs = Date.now();
-      const lockedDocId = getAttendanceDocId(user, todayKey);
-      const optimisticRecord = {
-        id: lockedDocId,
-        user,
-        name: currentUser.name,
-        dateKey: todayKey,
-        createdAtMs: nowMs,
-        loc: currentPos,
-        __cached: true
-      };
-      saveAttendanceCache(user, { dateKey: todayKey, createdAtMs: nowMs });
-      upsertAttendanceRecord(optimisticRecord);
-      attendanceReady = true;
-      refreshCurrentPage();
-
-      await setDoc(doc(db, 'attendance', lockedDocId), {
-        user,
-        name: currentUser.name,
-        dateKey: todayKey,
-        createdAt: serverTimestamp(),
-        createdAtMs: nowMs,
-        loc: currentPos,
-        deleted: false
-      }, { merge: true });
-      showToast('✓ Absen berhasil');
-    } catch (e) {
-      console.error('Gagal absen:', e);
-      clearAttendanceCache(user);
-      stripCachedAttendance();
-      refreshCurrentPage();
-      showToast('Gagal absen', true);
-    } finally {
-      clockInInFlight = false;
-      setLoading(false);
-    }
   }
 
   function formatMoneyInputElement(el) {
@@ -4264,6 +3994,7 @@ ${lockedByGlobal ? 'Hanya user ini yang dibuka dari closing global. Bonus closin
         pendingTransactionPaymentDraft = null;
         closeTransactionPaymentModal(true);
         closeTransactionModal();
+        await refreshCurrentPage();
         setLoading(false);
         return;
       }
@@ -4346,6 +4077,7 @@ ${lockedByGlobal ? 'Hanya user ini yang dibuka dari closing global. Bonus closin
       showToast(`✓ Transaksi disimpan · ${paymentInfo.label}${shouldPrint ? ' · cetak struk' : ''}`);
       closeTransactionPaymentModal(true);
       closeTransactionModal();
+      await refreshCurrentPage();
       if (shouldPrint) setTimeout(() => directPrintReceiptText(buildTransactionReceiptText(savedTx), 'Struk Transaksi Baru'), 180);
     } catch (e) {
       console.error(e);
@@ -4373,6 +4105,7 @@ ${lockedByGlobal ? 'Hanya user ini yang dibuka dari closing global. Bonus closin
       }, { merge: true });
       await logAudit('transaction_soft_delete', { id, user: trx.user, amount: Number(trx.amount || 0), note: trx.note || 'Transaksi' });
       showToast(`✓ Transaksi dihapus aman`);
+      await refreshCurrentPage();
     } catch (e) {
       console.error(e);
       showToast('Gagal hapus', true);
@@ -4491,104 +4224,12 @@ ${lockedByGlobal ? 'Hanya user ini yang dibuka dari closing global. Bonus closin
   }
 
   async function updateHomeStatus() {
-    const el = $('home-status'); if (!el) return;
-    if (isAdmin()) {
-      const userCount = cachedUsers.length || new Set(cachedTransactions.map(t => t.user)).size || 0;
-      const activeToday = new Set(cachedAttendance.filter(a => !isRecordDeleted(a) && extractDateKey(a) === toDateKey(nowDate())).map(a => sanitizeUsername(a.user))).size;
-      el.innerHTML = `<div style="display:flex;flex-direction:column;gap:3px"><div style="display:flex;align-items:center;gap:8px;font-size:13px;font-weight:700;color:var(--accent)"><i class="fas fa-shield-halved"></i> Panel admin aktif</div><div style="font-size:12px;color:var(--text-soft)">Total user: ${userCount} · aktif hari ini: ${activeToday}</div><div style="font-size:11px;color:var(--text-ghost)">Admin bisa transaksi langsung tanpa absen.</div></div>`;
-      return;
-    }
-    if (isTransactionsClosedToday()) {
-      const closing = getTodayUserClosing(currentUser?.username) || getTodayGlobalClosing();
-      const jamClosing = getClosingDisplayTime(closing) || '--:--';
-      el.innerHTML = `<div style="display:flex;flex-direction:column;gap:3px"><div style="display:flex;align-items:center;gap:8px;font-size:13px;font-weight:700;color:var(--amber)"><i class="fas fa-lock"></i> Transaksi sudah closing</div><div style="font-size:12px;color:var(--text-soft)">Jam closing: ${jamClosing} WIB · terbuka lagi besok.</div></div>`;
-    } else if (isDailyEmployee(currentUser)) {
-      el.innerHTML = `<div style="display:flex;flex-direction:column;gap:3px"><div style="display:flex;align-items:center;gap:8px;font-size:13px;font-weight:800;color:var(--accent)"><i class="fas fa-user-check"></i> Karyawan Harian</div><div style="font-size:12px;color:var(--text-soft)">Tanpa absen · transaksi hari ini saja.</div></div>`;
-    } else if (!attendanceReady) {
-      if (hasClockedInToday()) {
-        const rec = getTodayAttendanceRecord();
-        const jam = formatAttendanceTime(rec);
-        el.innerHTML = `<div style="display:flex;flex-direction:column;gap:3px"><div style="display:flex;align-items:center;gap:8px;font-size:13px;font-weight:700;color:var(--green)"><i class="fas fa-circle-check"></i> Status absen tersimpan</div><div style="font-size:12px;color:var(--text-soft)">Jam absen: ${jam} · memverifikasi ke server...</div></div>`;
-      } else {
-        el.innerHTML = `<div style="display:flex;align-items:center;gap:8px;font-size:12px;color:var(--text-soft)"><i class="fas fa-circle-notch fa-spin"></i> Memuat status absen...</div>`;
-      }
-    } else if (hasClockedInToday()) {
-      const rec = getTodayAttendanceRecord();
-      const jam = formatAttendanceTime(rec);
-      el.innerHTML = `<div style="display:flex;flex-direction:column;gap:3px"><div style="display:flex;align-items:center;gap:8px;font-size:13px;font-weight:700;color:var(--green)"><i class="fas fa-circle-check"></i> Sudah absen hari ini</div><div style="font-size:12px;color:var(--text-soft)">Jam absen: ${jam}</div></div>`;
-    } else {
-      const dist = currentPos ? calculateDistance(currentPos.lat, currentPos.lng, OFFICE_LOC.lat, OFFICE_LOC.lng) : null;
-      const disabled = !currentPos || (dist && dist > RADIUS_LIMIT);
-      el.innerHTML = `<button onclick="handleClockIn()" ${disabled?'disabled':''} class="btn btn-primary" style="padding:12px 16px;width:auto;border-radius:12px"><i class="fas fa-fingerprint" style="font-size:13px"></i> Absen</button>`;
-    }
+    const el = $('home-status');
+    if (!el) return;
+    const userCount = cachedUsers.length || new Set(cachedTransactions.map(t => t.user)).size || 0;
+    const activeToday = new Set(cachedAttendance.filter(a => !isRecordDeleted(a) && extractDateKey(a) === toDateKey(nowDate())).map(a => sanitizeUsername(a.user))).size;
+    el.innerHTML = `<div style="display:flex;flex-direction:column;gap:3px"><div style="display:flex;align-items:center;gap:8px;font-size:13px;font-weight:700;color:var(--accent)"><i class="fas fa-shield-halved"></i> Panel admin aktif</div><div style="font-size:12px;color:var(--text-soft)">Total user: ${userCount} - aktif hari ini: ${activeToday}</div><div style="font-size:11px;color:var(--text-ghost)">Admin bisa transaksi langsung tanpa absen.</div></div>`;
   }
-
-
-  function renderStaffTodayHistory() {
-    const box = $('staff-today-history');
-    if (!box) return;
-    const today = toDateKey(nowDate());
-    const items = sortByCreatedDesc(getVisibleTransactions().filter(t => getTransactionDateKey(t) === today));
-    const total = items.reduce((a,b)=>a+Number(b.amount||0),0);
-    box.innerHTML = `
-      <div style="display:flex;align-items:center;justify-content:space-between;margin-bottom:10px">
-        <div><p class="label-xs" style="margin-bottom:2px">Riwayat Hari Ini</p><p style="font-size:11px;color:var(--text-soft)">${items.length} transaksi · Rp ${formatRupiah(total)}</p></div>
-      </div>
-      <div style="display:flex;flex-direction:column;gap:8px">
-        ${items.length ? items.slice(0, 8).map(t => `
-          <div class="trx-card" style="padding:10px 12px;border-radius:13px">
-            <div style="min-width:0;flex:1">
-              <div style="display:flex;align-items:center;justify-content:space-between;gap:10px">
-                <p class="trx-note" style="max-width:185px;margin:0;font-size:12px;color:var(--text);font-weight:700">${escapeHtml(t.note || 'Transaksi')}</p>
-                <p class="trx-amount" style="font-size:14px;white-space:nowrap">Rp ${formatRupiah(t.amount)}</p>
-              </div>
-              <div style="display:flex;align-items:center;justify-content:space-between;gap:10px;margin-top:4px">
-                <span class="trx-time" style="font-size:9.5px">${dateToTimeInput(new Date(getRecordTimeMs(t) || Date.now()))} · ${getTransactionPaymentLabel(t)}</span>
-                <span class="trx-actions-inline"><button onclick="openEditTransactionModal('${t.id}')" class="btn btn-glass" title="Edit"><i class="fas fa-pen"></i></button><button onclick="deleteTransaction('${t.id}')" class="btn btn-danger" title="Hapus"><i class="fas fa-trash"></i></button></span>
-              </div>
-            </div>
-          </div>`).join('') : `<div style="padding:18px 10px;text-align:center;border:1px dashed var(--border);border-radius:14px;color:var(--text-soft);font-size:12px">Belum ada transaksi hari ini.</div>`}
-      </div>`;
-  }
-
-
-  function renderStaffTodayHistoryPage() {
-    const box = $('staff-today-history-page');
-    if (!box) return;
-    const today = toDateKey(nowDate());
-    const items = sortByCreatedDesc(getVisibleTransactions().filter(t => getTransactionDateKey(t) === today));
-    const total = items.reduce((a,b)=>a+Number(b.amount||0),0);
-    box.innerHTML = `
-      <div class="card page-in s1" style="padding:14px 15px;margin-bottom:12px;background:linear-gradient(145deg,var(--bg3),var(--bg2));border-color:rgba(91,143,255,.16)">
-        <div style="display:flex;align-items:center;justify-content:space-between;gap:10px">
-          <div>
-            <p class="label-xs" style="margin-bottom:5px">Total Hari Ini</p>
-            <p style="font-family:var(--num-font);font-size:25px;font-weight:850;color:var(--accent);line-height:1">Rp ${formatRupiah(total)}</p>
-            <p style="font-size:11px;color:var(--text-soft);margin-top:6px">${items.length} transaksi tersimpan · ${formatDateLabel(today)}</p>
-          </div>
-        </div>
-      </div>
-      <div style="display:flex;flex-direction:column;gap:9px;padding-bottom:86px">
-        ${items.length ? items.map(t => `
-          <div class="trx-card" style="padding:12px 13px;border-radius:14px">
-            <div class="trx-icon"><i class="fas fa-receipt"></i></div>
-            <div style="min-width:0;flex:1">
-              <div style="display:flex;align-items:center;justify-content:space-between;gap:10px">
-                <div style="min-width:0;flex:1">
-                  <p class="trx-note" style="max-width:190px;margin:0;font-size:13.5px;color:var(--text);font-weight:800;white-space:normal;line-height:1.3">${escapeHtml(t.note || 'Transaksi')}</p>
-                  <p class="trx-time" style="font-size:10px;margin-top:5px">${dateToTimeInput(new Date(getRecordTimeMs(t) || Date.now()))} · ${getTransactionPaymentLabel(t)}</p>
-                </div>
-                <div class="trx-right-inline">
-                  <p class="trx-amount" style="font-size:15px;white-space:nowrap;color:var(--green)">Rp ${formatRupiah(t.amount)}</p>
-                  <span class="trx-actions-inline"><button onclick="openEditTransactionModal('${t.id}')" class="btn btn-glass" title="Edit"><i class="fas fa-pen"></i></button><button onclick="deleteTransaction('${t.id}')" class="btn btn-danger" title="Hapus"><i class="fas fa-trash"></i></button></span>
-                </div>
-              </div>
-            </div>
-          </div>`).join('') : `<div class="card" style="padding:28px 16px;text-align:center;color:var(--text-soft);font-size:12px;border-style:dashed"><i class="fas fa-receipt" style="font-size:22px;margin-bottom:10px;color:var(--text-ghost)"></i><br>Belum ada transaksi hari ini.</div>`}
-      </div>`;
-  }
-
-
 
 
   function getClosingHistoryRows(limitRows = 14) {
@@ -4867,37 +4508,21 @@ ${lockedByGlobal ? 'Hanya user ini yang dibuka dari closing global. Bonus closin
   async function updateHomeStats() {
     const today = toDateKey(nowDate());
     const month = toMonthKey(nowDate());
-    const visibleTransactions = getVisibleTransactions();
-    const visibleAttendance = getVisibleAttendance();
-    // HOME/Beranda admin harus selalu GLOBAL.
-    // Filter user yang dipilih di halaman Global/Riwayat tidak boleh bocor ke kartu Home.
-    // Untuk staff, getVisibleTransactions()/getVisibleAttendance() sudah otomatis dibatasi ke data sendiri.
-    const sourceTransactions = visibleTransactions;
-    const sourceAttendance = visibleAttendance;
+    const sourceTransactions = getVisibleTransactions();
     const pendapatanHariIni = sourceTransactions.filter(t => extractDateKey(t) === today).reduce((a,b)=>a+Number(b.amount||0),0);
     const omzetBulanan = sourceTransactions.filter(t => t.monthKey === month).reduce((a,b)=>a+Number(b.amount||0),0);
-    const bonusScopeUser = isAdmin() ? null : currentUser.username;
-    const bonusBreakdown = getBonusBreakdown(sourceTransactions, bonusScopeUser, month);
-    const todayBonusBreakdown = getBonusBreakdown(sourceTransactions, bonusScopeUser, { type: 'daily', dateKey: today });
-    const dailyMode = !isAdmin() && isDailyEmployee(currentUser);
-    const dailyPay = dailyMode ? getDailyEmployeeTodaySalary(currentUser.username, today) : null;
-    const dailyManualBonus = dailyMode ? getMonthlyManualBonus(currentUser.username, month) : 0;
-    const rec = sortByCreatedDesc(sourceAttendance.filter(a => extractDateKey(a) === today))[0] || null;
+    const bonusBreakdown = getBonusBreakdown(sourceTransactions, null, month);
+    const todayBonusBreakdown = getBonusBreakdown(sourceTransactions, null, { type: 'daily', dateKey: today });
     if ($('today-income')) $('today-income').innerText = `Rp ${formatRupiah(pendapatanHariIni)}`;
     if ($('home-cash-fisik-total')) {
       const shouldForceCash = forceCashFisikNextRender;
       forceCashFisikNextRender = false;
       await updateHomeCashFisikCard(today, shouldForceCash);
     }
-    if ($('total-bonus')) $('total-bonus').innerText = dailyMode ? `Rp ${formatRupiah(dailyPay.salary + dailyManualBonus)}` : `Rp ${formatRupiah(bonusBreakdown.totalBonus)}`;
+    if ($('total-bonus')) $('total-bonus').innerText = `Rp ${formatRupiah(bonusBreakdown.totalBonus)}`;
     if ($('bonus-text')) {
-      if (dailyMode) {
-        $('bonus-text').style.display = '';
-        $('bonus-text').innerText = `${dailyPay.items.length} transaksi hari ini${dailyManualBonus ? ' · bonus manual Rp ' + formatRupiah(dailyManualBonus) : ''}`;
-      } else {
-        $('bonus-text').style.display = '';
-        $('bonus-text').innerText = 'Bonus ini sudah termasuk total bonus keseluruhan';
-      }
+      $('bonus-text').style.display = '';
+      $('bonus-text').innerText = 'Bonus ini sudah termasuk total bonus keseluruhan';
     }
     if ($('month-omzet')) $('month-omzet').innerText = `Rp ${formatRupiah(omzetBulanan)}`;
     if ($('today-bonus-total')) $('today-bonus-total').innerText = `Rp ${formatRupiah(todayBonusBreakdown.totalBonus)}`;
@@ -4906,92 +4531,9 @@ ${lockedByGlobal ? 'Hanya user ini yang dibuka dari closing global. Bonus closin
       const staffToday = Number(todayBonusBreakdown.staffTransactionBonus || todayBonusBreakdown.trxBonus || 0) + Number(todayBonusBreakdown.closingBonus || 0);
       const harianToday = Number(todayBonusBreakdown.dailySalary || 0);
       const manualToday = Number(todayBonusBreakdown.manualBonus || 0);
-      $('today-bonus-text').innerText = `Staff Rp ${formatRupiah(staffToday)} · Harian Rp ${formatRupiah(harianToday)}${manualToday ? ' · Manual Rp ' + formatRupiah(manualToday) : ''}`;
+      $('today-bonus-text').innerText = `Staff Rp ${formatRupiah(staffToday)} ? Harian Rp ${formatRupiah(harianToday)}${manualToday ? ' ? Manual Rp ' + formatRupiah(manualToday) : ''}`;
     }
-    const todayClosing = isAdmin() ? getTodayGlobalClosing() : (getTodayUserClosing(currentUser?.username) || getTodayGlobalClosing());
-    const closingJam = getClosingDisplayTime(todayClosing);
-    if ($('today-attendance-info')) $('today-attendance-info').innerText = dailyMode ? 'Harian' : (todayClosing ? (closingJam || '--:--') : (rec ? formatAttendanceTime(rec).slice(0,5) : '--:--'));
-    const card = $('today-attendance-card'), lbl = $('today-attendance-label'), info = $('today-attendance-info');
-    if (card && lbl && info) {
-      if (dailyMode) {
-        card.style.background = 'var(--accent-dim)'; card.style.borderColor = 'rgba(91,143,255,0.22)';
-        lbl.style.color = 'var(--accent)'; info.style.color = 'var(--accent)';
-        lbl.innerText = 'Mode';
-      } else if (todayClosing) {
-        card.style.background = 'var(--amber-dim)'; card.style.borderColor = 'rgba(255,196,107,0.22)';
-        lbl.style.color = 'var(--amber)'; info.style.color = 'var(--amber)';
-        lbl.innerText = 'Jam Closing';
-      } else if (rec) {
-        card.style.background = 'var(--green-dim)'; card.style.borderColor = 'rgba(82,216,158,0.2)';
-        lbl.style.color = 'var(--green)'; info.style.color = 'var(--green)';
-        lbl.innerText = 'Jam';
-      } else {
-        card.style.background = 'var(--red-dim)'; card.style.borderColor = 'rgba(255,107,107,0.2)';
-        lbl.style.color = 'var(--red)'; info.style.color = 'var(--red)';
-        lbl.innerText = 'Jam';
-      }
-    }
-    if ($('scope-chip')) $('scope-chip').textContent = isAdmin() ? 'Semua User' : 'Data Saya';
-    if ($('staff-closing-status')) $('staff-closing-status').innerHTML = renderClosingStatusHtml(true);
-    if (isAdmin()) renderAdminClosingPanelMaybe();
-    if (!isAdmin()) {
-      renderStaffTodayHistory();
-      // Render card rata-rata absen bulanan
-      const perfCard = $('attendance-performance-card');
-      if (perfCard) {
-        if (dailyMode) {
-          perfCard.innerHTML = `
-            <div style="display:flex;align-items:center;justify-content:space-between;gap:10px">
-              <div style="min-width:0;flex:1">
-                <p class="label-xs" style="margin-bottom:4px">Gaji Karyawan Harian</p>
-                <p style="font-size:12px;color:var(--text-soft);line-height:1.35">Hanya data hari ini. Transaksi tetap masuk ke total global admin.</p>
-                <p style="font-size:10.5px;color:var(--text-ghost);margin-top:4px">Omzet: Rp ${formatRupiah(dailyPay.income)} · ${dailyPay.items.length} transaksi</p>
-              </div>
-              <div style="text-align:center;border:1px solid rgba(255,196,107,0.2);border-radius:11px;padding:8px 12px;background:var(--amber-dim);flex-shrink:0">
-                <p style="font-family:var(--num-font);font-size:20px;font-weight:850;color:var(--amber);line-height:1">Rp ${formatRupiah(dailyPay.salary)}</p>
-                <p style="font-size:9px;font-weight:800;letter-spacing:.05em;text-transform:uppercase;color:var(--amber);margin-top:3px">Gaji Hari Ini</p>
-              </div>
-            </div>`;
-          return;
-        }
-        const month = toMonthKey(nowDate());
-        const perf = getMonthlyAttendancePerformance(currentUser.username);
-        if (!perf) {
-          perfCard.innerHTML = `
-            <div style="display:flex;align-items:center;justify-content:space-between;gap:10px">
-              <div>
-                <p class="label-xs" style="margin-bottom:4px">Rata-rata Jam Absen</p>
-                <p style="font-size:11px;color:var(--text-ghost)">Bulan ${month} · belum ada data</p>
-              </div>
-              <div style="text-align:center;border:1px solid var(--border);border-radius:11px;padding:8px 12px;background:var(--surface)">
-                <p style="font-family:var(--num-font);font-size:17px;font-weight:800;color:var(--text-ghost);line-height:1">--:--</p>
-                <p style="font-size:9px;font-weight:700;letter-spacing:.05em;text-transform:uppercase;color:var(--text-ghost);margin-top:3px">Belum Ada Data</p>
-              </div>
-            </div>`;
-        } else {
-          const color = perf.isGood ? 'var(--green)' : 'var(--amber)';
-          const bgColor = perf.isGood ? 'var(--green-dim)' : 'var(--amber-dim)';
-          const borderColor = perf.isGood ? 'rgba(82,216,158,0.2)' : 'rgba(255,196,107,0.2)';
-          const icon = perf.isGood ? 'fa-circle-check' : 'fa-circle-exclamation';
-          const label = perf.isGood ? 'Performa Baik ✓' : 'Perlu Ditingkatkan';
-          perfCard.innerHTML = `
-            <div style="display:flex;align-items:center;justify-content:space-between;gap:10px">
-              <div style="flex:1;min-width:0">
-                <p class="label-xs" style="margin-bottom:4px">Rata-rata Jam Absen</p>
-                <div style="display:flex;align-items:center;gap:6px;margin-top:2px">
-                  <i class="fas ${icon}" style="color:${color};font-size:11px"></i>
-                  <p style="font-size:12px;font-weight:700;color:${color}">${label}</p>
-                </div>
-                <p style="font-size:10px;color:var(--text-ghost);margin-top:3px">Bulan ${month} · ${perf.count} hari hadir</p>
-              </div>
-              <div style="text-align:center;border:1px solid ${borderColor};border-radius:11px;padding:8px 12px;background:${bgColor};flex-shrink:0">
-                <p style="font-family:var(--num-font);font-size:20px;font-weight:800;color:${color};line-height:1">${perf.avgLabel}</p>
-                <p style="font-size:9px;font-weight:700;letter-spacing:.05em;text-transform:uppercase;color:${color};margin-top:3px;opacity:.8">Rata-rata</p>
-              </div>
-            </div>`;
-        }
-      }
-    }
+    if ($('scope-chip')) $('scope-chip').textContent = 'Semua User';
     renderAdminDashboardPanels();
   }
 
@@ -5929,6 +5471,7 @@ ${lockedByGlobal ? 'Hanya user ini yang dibuka dari closing global. Bonus closin
       selectedUserFilter = username;
       clearAdminUserForm();
       await renderSettingsSummary();
+      await refreshCurrentPage();
     } catch (e) {
       console.error(e);
       showToast('Gagal simpan user', true);
@@ -7784,7 +7327,7 @@ Ketik PIN admin untuk lanjut:`);
   }
 
   const ADMIN_PANEL_STATE_KEY = 'rocky_admin_setting_panels_v1';
-  const ADMIN_PANEL_KEYS = ['attendance','manual_bonus','receipt_text','header_guide_note','daily_employee','user_management','backup_restore','deleted_data'];
+  const ADMIN_PANEL_KEYS = ['attendance','manual_bonus','receipt_text','daily_employee','user_management','backup_restore','deleted_data'];
   let adminSettingPanels = (() => {
     try { return JSON.parse(localStorage.getItem(ADMIN_PANEL_STATE_KEY) || '{}') || {}; }
     catch (e) { return {}; }
@@ -8044,7 +7587,6 @@ Masukkan PIN admin:`);
     if (key === 'attendance') return renderAdminAttendancePerformanceBody();
     if (key === 'manual_bonus') return renderManualBonusCard();
     if (key === 'receipt_text') return renderReceiptTextSettingsBody();
-    if (key === 'header_guide_note') return renderHeaderGuideNoteControlBody();
     if (key === 'daily_employee') return renderDailyEmployeeControlBody();
     if (key === 'user_management') return renderUserManagementBody(activeUsers().length);
     if (key === 'backup_restore') return renderBackupRestoreBody();
@@ -8061,7 +7603,7 @@ Masukkan PIN admin:`);
   function openAdminProPage(key) {
     if (!isAdmin()) return router.navigate('home');
     const titles = {
-      attendance:'Performa Absen Staff', manual_bonus:'Tambah Bonus Manual', receipt_text:'Setting Tulisan Struk', header_guide_note:'Catatan Panduan Header', daily_employee:'Kontrol Bonus Khusus User', user_management:'Manajemen User', backup_restore:'Backup, Reset & Restore', deleted_data:'Data Terhapus'
+      attendance:'Performa Absen Staff', manual_bonus:'Tambah Bonus Manual', receipt_text:'Setting Tulisan Struk', daily_employee:'Kontrol Bonus Khusus User', user_management:'Manajemen User', backup_restore:'Backup, Reset & Restore', deleted_data:'Data Terhapus'
     };
     const safeKey = String(key || '').trim();
     if (!adminProCurrentPageKey) {
@@ -8109,7 +7651,6 @@ Masukkan PIN admin:`);
       ['attendance','Performa Absen Staff', 'Rata-rata jam absen bulanan staff', 'fa-user-clock'],
       ['manual_bonus','Tambah Bonus Manual', 'Tambah bonus ke staff/harian pilihan', 'fa-hand-holding-dollar'],
       ['receipt_text','Setting Tulisan Struk', 'Ubah nama toko, label, footer, dan jarak sobek', 'fa-receipt'],
-      ['header_guide_note','Catatan Panduan Header', 'Ubah catatan saat panduan header di-hide', 'fa-pen-to-square'],
       ['daily_employee','Kontrol Bonus Khusus User', 'Atur bonus transaksi per user langsung', 'fa-user-tag'],
       ['user_management','Manajemen User', 'Tambah, edit, nonaktifkan user', 'fa-users-gear'],
       ['backup_restore','Backup, Reset & Restore', 'Backup, restore otomatis, normalisasi', 'fa-database'],
@@ -8137,64 +7678,6 @@ Masukkan PIN admin:`);
       .replaceAll('"', '&quot;')
       .replaceAll("'", '&#39;');
   }
-
-  function normalizeStaffDailyNoteUrl(rawUrl) {
-    const url = String(rawUrl || '').trim();
-    if (/^https?:\/\//i.test(url)) return url;
-    if (/^www\./i.test(url)) return 'https://' + url;
-    return url;
-  }
-
-  function openStaffDailyNoteLink(event, rawUrl) {
-    if (event) event.preventDefault();
-    const url = normalizeStaffDailyNoteUrl(rawUrl);
-    if (!/^https?:\/\//i.test(url)) return false;
-    try {
-      const bridge = window.Android;
-      const methods = ['openExternalUrl', 'openExternalLink', 'openUrl', 'openBrowser'];
-      if (bridge) {
-        for (const method of methods) {
-          if (typeof bridge[method] === 'function') {
-            bridge[method](url);
-            return false;
-          }
-        }
-      }
-    } catch (e) {
-      console.warn('open external link bridge failed', e);
-    }
-    const opened = window.open(url, '_blank', 'noopener,noreferrer');
-    if (!opened) window.location.href = url;
-    return false;
-  }
-
-  function renderStaffDailyNoteLinks(value) {
-    const text = String(value || '');
-    const urlRegex = /((?:https?:\/\/|www\.)[^\s<>"']+)/gi;
-    let html = '';
-    let lastIndex = 0;
-    text.replace(urlRegex, (match, url, offset) => {
-      html += escapeHtml(text.slice(lastIndex, offset));
-      let label = url;
-      let trailing = '';
-      const trailingMatch = label.match(/[),.;!?]+$/);
-      if (trailingMatch) {
-        trailing = trailingMatch[0];
-        label = label.slice(0, -trailing.length);
-      }
-      const href = normalizeStaffDailyNoteUrl(label);
-      if (/^https?:\/\//i.test(href)) {
-        html += `<a class="staff-daily-link" href="${escapeHtml(href)}" target="_blank" rel="noopener noreferrer" onclick="return openStaffDailyNoteLink(event, this.href)">${escapeHtml(label)}</a>${escapeHtml(trailing)}`;
-      } else {
-        html += escapeHtml(match);
-      }
-      lastIndex = offset + match.length;
-      return match;
-    });
-    html += escapeHtml(text.slice(lastIndex));
-    return html;
-  }
-
 
   function getAttendanceAdminUsers() {
     return activeUsers().filter(u => {
@@ -8531,10 +8014,7 @@ Masukkan PIN admin:`);
 
 
   function applyNavRoleLabels() {
-    const adminMode = isAdmin();
-    const labels = adminMode
-      ? { home:'Admin', history:'Riwayat', attendance:'Absen', closing:'Closing', report:'Laporan', settings:'User' }
-      : { home:'Beranda', history:'Hari Ini', attendance:'Absen', closing:'Closing', report:'Laporan', settings:'Setelan' };
+    const labels = { home:'Admin', history:'Riwayat', attendance:'Absen', closing:'Closing', report:'Laporan', settings:'User' };
     if ($('nav-home-label')) $('nav-home-label').textContent = labels.home;
     if ($('nav-history-label')) $('nav-history-label').textContent = labels.history;
     if ($('nav-attendance-label')) $('nav-attendance-label').textContent = labels.attendance;
@@ -8542,51 +8022,26 @@ Masukkan PIN admin:`);
     if ($('nav-report-label')) $('nav-report-label').textContent = labels.report;
     if ($('nav-settings-label')) $('nav-settings-label').textContent = labels.settings;
     const attendanceBtn = $('nav-attendance'), closingBtn = $('nav-closing'), reportBtn = $('nav-report'), settingsBtn = $('nav-settings');
-    if (attendanceBtn) attendanceBtn.style.display = adminMode ? 'flex' : 'none';
-    if (closingBtn) closingBtn.style.display = adminMode ? 'flex' : 'none';
-    if (reportBtn) reportBtn.style.display = adminMode ? 'flex' : 'none';
-    if (settingsBtn) settingsBtn.style.display = adminMode ? 'flex' : 'none';
+    if (attendanceBtn) attendanceBtn.style.display = 'flex';
+    if (closingBtn) closingBtn.style.display = 'flex';
+    if (reportBtn) reportBtn.style.display = 'flex';
+    if (settingsBtn) settingsBtn.style.display = 'flex';
   }
 
   function setActiveNav(page) {
     applyNavRoleLabels();
     const navEl = $('bottom-nav');
     if (navEl) {
-      navEl.classList.toggle('staff-nav', !!currentUser && !isAdmin());
-      navEl.classList.toggle('admin-six-nav', !!currentUser && isAdmin());
+      navEl.classList.remove('staff-nav');
+      navEl.classList.toggle('admin-six-nav', !!currentUser);
     }
     ['home','history','attendance','closing','report','settings'].forEach(p => {
       const btn = $('nav-' + p); if (btn) btn.classList.toggle('active', p === page || (page === 'adminLogs' && p === 'settings'));
     });
     const fab = $('fab-pos');
     if (!fab) return;
-    fab.classList.toggle('staff-fab', !!currentUser && !isAdmin());
+    fab.classList.remove('staff-fab');
     fab.style.display = 'none';
-  }
-
-
-  function handleStaffSwipeStart(e) {
-    staffSwipeStartT = 0;
-    if (!currentUser || isAdmin()) return;
-    const touch = e.touches && e.touches[0];
-    if (!touch || isBackSwipeIgnoredTarget(e.target)) return;
-    staffSwipeStartX = touch.clientX;
-    staffSwipeStartY = touch.clientY;
-    staffSwipeStartT = Date.now();
-  }
-
-  function handleStaffSwipeEnd(e) {
-    if (!currentUser || isAdmin()) return;
-    if (!['home','history'].includes(currentPage)) return;
-    const touch = e.changedTouches && e.changedTouches[0];
-    if (!touch || !staffSwipeStartT) return;
-    const dx = touch.clientX - staffSwipeStartX;
-    const dy = touch.clientY - staffSwipeStartY;
-    const dt = Date.now() - staffSwipeStartT;
-    staffSwipeStartT = 0;
-    if (Math.abs(dx) < 70 || Math.abs(dx) < Math.abs(dy) * 1.35 || dt > 900) return;
-    if (dx < 0 && currentPage === 'home') router.navigate('history');
-    if (dx > 0 && currentPage === 'history') router.navigate('home');
   }
 
   function isBackSwipeIgnoredTarget(target) {
@@ -8662,12 +8117,10 @@ Masukkan PIN admin:`);
       const themeIcon = getTheme() === 'dark' ? '<i class="fas fa-moon"></i>' : '<i class="fas fa-sun"></i>';
       const memberIcon = '<a href="https://idhamkhalid24.github.io/kode-khusus-member/" target="_blank" rel="noopener noreferrer" class="theme-toggle member-btn" title="Member" aria-label="Member"><i class="fas fa-id-card"></i></a>';
       const refreshIcon = '<button class="theme-toggle refresh-btn" onclick="manualRefreshData()" title="Refresh Data" aria-label="Refresh Data"><i class="fas fa-rotate"></i></button>';
-      if (!window.__staffSwipeReady && content) {
-        content.addEventListener('touchstart', handleStaffSwipeStart, { passive:true });
-        content.addEventListener('touchend', handleStaffSwipeEnd, { passive:true });
+      if (!window.__adminSwipeReady && content) {
         content.addEventListener('touchstart', handleAppBackSwipeStart, { passive:true });
         content.addEventListener('touchend', handleAppBackSwipeEnd, { passive:false });
-        window.__staffSwipeReady = true;
+        window.__adminSwipeReady = true;
       }
 
       if (page === 'login') {
@@ -8701,7 +8154,7 @@ Masukkan PIN admin:`);
 
       if (page === 'home') {
         nav.style.display = 'flex'; setActiveNav(page);
-        content.innerHTML = isAdmin() ? `
+        content.innerHTML = `
           <div class="page-pad" style="padding-top:8px">
             <div style="padding:10px 0 8px;display:flex;justify-content:space-between;align-items:center" class="page-in">
               <div>
@@ -8756,94 +8209,10 @@ Masukkan PIN admin:`);
               </div>
             </div>
             <div id="admin-dashboard-panels"></div>
-          </div>` : `
-          <div class="page-pad" style="padding-bottom:98px">
-            <div style="padding:18px 0 12px;display:flex;justify-content:space-between;align-items:center;gap:12px" class="page-in">
-              <div style="min-width:0">
-                <p style="font-size:11px;color:var(--text-ghost);font-weight:700;margin-bottom:3px">Halo, ${escapeHtml(currentUser.name)}</p>
-                <h2 style="font-size:20px;font-weight:850;letter-spacing:-.03em;white-space:nowrap;overflow:hidden;text-overflow:ellipsis">Bismillah Dulu</h2>
-              </div>
-              <div class="header-actions">
-                ${memberIcon}
-                ${refreshIcon}
-                <button class="theme-toggle theme-btn" onclick="toggleTheme()">${themeIcon}</button>
-                <button class="theme-toggle logout-btn" onclick="logout()" title="Logout"><i class="fas fa-power-off"></i></button>
-              </div>
-            </div>
-            ${renderStaffDailyHomeNotePublicCard()}
-            ${isDailyEmployee(currentUser) ? `
-            <div class="stat-hero page-in s1" style="margin-bottom:10px">
-              <p class="stat-label">Pendapatan Hari Ini</p>
-              <p id="today-income" class="stat-value">Rp 0</p>
-              <p class="stat-sub">Data transaksi hari ini saja</p>
-            </div>
-            <div class="bonus-card page-in s2" style="padding:14px 15px;margin-bottom:9px">
-              <div style="display:flex;align-items:center;justify-content:space-between;gap:10px">
-                <div>
-                  <p class="label-xs" style="margin-bottom:6px;color:var(--amber)">Gaji Hari Ini</p>
-                  <p id="total-bonus" style="font-family:var(--num-font);font-size:23px;font-weight:850;color:var(--amber);line-height:1">Rp 0</p>
-                  <p id="bonus-text" style="font-size:10.5px;color:var(--text-soft);margin-top:5px"></p>
-                </div>
-                <span id="scope-chip" class="user-chip">Harian</span>
-              </div>
-            </div>` : `
-            <div class="card page-in s1" style="padding:13px 14px;margin-bottom:10px">
-              <div style="display:flex;align-items:center;justify-content:space-between;gap:10px;margin-bottom:10px">
-                <p class="label-xs" style="margin:0">Absen Hari Ini</p>
-                <div id="loc-info"><span class="loc-chip loc-loading"><i class="fas fa-circle-notch fa-spin" style="font-size:10px"></i> GPS...</span></div>
-              </div>
-              <div style="display:flex;align-items:center;justify-content:space-between;gap:10px">
-                <div id="home-status"></div>
-                <div id="today-attendance-card" style="min-width:82px;text-align:center;border:1px solid rgba(255,107,107,0.2);border-radius:13px;padding:9px 10px;background:var(--red-dim)">
-                  <p id="today-attendance-label" style="font-size:9px;font-weight:800;letter-spacing:.06em;text-transform:uppercase;color:var(--red);margin-bottom:4px">Jam</p>
-                  <p id="today-attendance-info" style="font-family:var(--num-font);font-size:18px;font-weight:800;color:var(--red);line-height:1">--:--</p>
-                </div>
-              </div>
-            </div>
-            <div id="attendance-performance-card" class="card page-in s2" style="padding:13px 14px;margin-bottom:10px"></div>
-            <div style="display:grid;grid-template-columns:1fr 1fr;gap:9px;margin-bottom:9px" class="page-in s2">
-              <div class="card" style="padding:13px 13px"><p class="label-xs" style="margin-bottom:8px">Pendapatan Hari Ini</p><p id="today-income" style="font-family:var(--num-font);font-size:17px;font-weight:800;color:var(--text)">Rp 0</p></div>
-              <div class="card" style="padding:13px 13px"><p class="label-xs" style="margin-bottom:8px">Pendapatan Bulanan</p><p id="month-omzet" style="font-family:var(--num-font);font-size:17px;font-weight:800;color:var(--green)">Rp 0</p></div>
-            </div>
-            <div class="bonus-card page-in s3" style="padding:14px 15px;margin-bottom:9px">
-              <div style="display:flex;align-items:center;justify-content:space-between;gap:10px"><div><p class="label-xs" style="margin-bottom:6px;color:var(--amber)">Bonus ++ </p><p id="total-bonus" style="font-family:var(--num-font);font-size:23px;font-weight:850;color:var(--amber);line-height:1">Rp 0</p><p id="bonus-text" style="font-size:10.5px;color:var(--text-soft);margin-top:5px">Bonus ini sudah termasuk total bonus keseluruhan</p></div><span id="scope-chip" class="user-chip">Data Saya</span></div>
-              <div id="staff-closing-status" style="margin-top:10px"></div>
-            </div>
-            `}
-            ${renderHeaderIconGuide()}
-            <button onclick="router.navigate('history')" class="btn btn-glass page-in s4" style="width:100%;padding:13px 14px;font-size:13px;border-radius:14px;margin-top:2px;justify-content:space-between">
-              <span><i class="fas fa-receipt"></i> Lihat Riwayat Hari Ini</span>
-              <i class="fas fa-chevron-right"></i>
-            </button>
-            <div class="swipe-hint page-in s4"><i class="fas fa-hand-pointer"></i> Geser kiri untuk Riwayat Hari Ini</div>
           </div>`;
         updateLocation(); updateHomeStatus(); updateHomeStats();
       } else if (page === 'history') {
         nav.style.display = 'flex'; setActiveNav(page);
-        if (!isAdmin()) {
-          content.innerHTML = `
-            <div class="page-pad">
-              <div style="padding:18px 0 14px;display:flex;justify-content:space-between;align-items:center;gap:12px" class="page-in">
-                <div style="display:flex;align-items:center;gap:10px;min-width:0">
-                  <button onclick="router.navigate('home')" class="theme-toggle" style="width:38px;height:38px"><i class="fas fa-arrow-left"></i></button>
-                  <div style="min-width:0">
-                    <p class="page-title" style="font-size:20px">Riwayat Hari Ini</p>
-                    <p class="page-subtitle">Khusus transaksi akun kamu hari ini</p>
-                  </div>
-                </div>
-                <div class="header-actions">
-                  ${memberIcon}
-                  ${refreshIcon}
-                  <button class="theme-toggle theme-btn" onclick="toggleTheme()">${themeIcon}</button>
-                  <button class="theme-toggle logout-btn" onclick="logout()" title="Logout"><i class="fas fa-power-off"></i></button>
-                </div>
-              </div>
-              <div class="swipe-hint page-in s1" style="margin-bottom:10px"><i class="fas fa-arrow-left"></i> Geser kanan untuk Beranda</div>
-              <div id="staff-today-history-page"></div>
-            </div>`;
-          renderStaffTodayHistoryPage();
-          return;
-        }
         content.innerHTML = `
           <div class="page-pad">
             <div style="padding:34px 0 18px;display:flex;justify-content:space-between;align-items:center" class="page-in">
@@ -8904,7 +8273,7 @@ Masukkan PIN admin:`);
         content.innerHTML = `
           <div class="page-pad">
             <div style="padding:34px 0 18px;display:flex;justify-content:space-between;align-items:center" class="page-in">
-              <div><p class="page-title">${isAdmin() ? 'Laporan Global' : 'Laporan'}</p><p class="page-subtitle">${isAdmin() ? 'Ringkasan semua user dalam satu panel' : 'Omzet, hadir, bonus, dan ringkasan kerja'}</p></div>
+              <div><p class="page-title">Laporan Global</p><p class="page-subtitle">Ringkasan semua user dalam satu panel</p></div>
               <div style="display:flex;gap:8px">
                 ${memberIcon}
                 ${refreshIcon}
@@ -8993,7 +8362,6 @@ Masukkan PIN admin:`);
   window.toggleAdminSettingPanel = toggleAdminSettingPanel;
   window.closeAdminSettingPanels = closeAdminSettingPanels;
   window.logout = logout;
-  window.handleClockIn = handleClockIn;
   window.openTransactionModal = openTransactionModal;
   window.closeTransactionModal = closeTransactionModal;
   window.closeTransactionPaymentModal = closeTransactionPaymentModal;
@@ -9013,16 +8381,9 @@ Masukkan PIN admin:`);
   window.saveUserBonusControl = saveUserBonusControl;
   window.saveManualBonus = saveManualBonus;
   window.deleteManualBonus = deleteManualBonus;
-  window.toggleHeaderGuide = toggleHeaderGuide;
-  window.saveHeaderGuideNote = saveHeaderGuideNote;
-  window.resetHeaderGuideNoteInput = resetHeaderGuideNoteInput;
-  window.saveStaffDailyHomeNote = saveStaffDailyHomeNote;
-  window.resetStaffDailyHomeNoteInput = resetStaffDailyHomeNoteInput;
-  window.updateStaffDailyNoteLivePreview = updateStaffDailyNoteLivePreview;
   window.saveReceiptTextSettings = saveReceiptTextSettings;
   window.resetReceiptTextSettingsForm = resetReceiptTextSettingsForm;
   window.updateReceiptSettingsPreview = updateReceiptSettingsPreview;
-  window.openStaffDailyNoteLink = openStaffDailyNoteLink;
   window.formatMoneyInputElement = formatMoneyInputElement;
   window.openAdminProPage = openAdminProPage;
   window.openEditTransactionModal = openEditTransactionModal;
@@ -9143,28 +8504,17 @@ Masukkan PIN admin:`);
     if (!currentUser) return { ok: false, errorCount: 0 };
     let errorCount = 0;
     const countError = (snap) => { if (!snap) errorCount++; return snap; };
-    preloadAttendanceCache();
+    const txQueryFresh = query(collection(db, 'transactions'), orderBy('createdAtMs', 'desc'), limit(TX_SYNC_LIMIT_ADMIN));
+    const txQueryFallback = query(collection(db, 'transactions'), limit(TX_SYNC_LIMIT_ADMIN));
+    const attendanceQuery = query(collection(db, 'attendance'), limit(ATT_SYNC_LIMIT_ADMIN));
+    const manualBonusQuery = query(collection(db, 'manualBonuses'), limit(MANUAL_BONUS_SYNC_LIMIT));
 
-    const txQueryFresh = isAdmin()
-      ? query(collection(db, 'transactions'), orderBy('createdAtMs', 'desc'), limit(TX_SYNC_LIMIT_ADMIN))
-      : query(collection(db, 'transactions'), where('user', '==', sanitizeUsername(currentUser.username)), orderBy('createdAtMs', 'desc'), limit(TX_SYNC_LIMIT_STAFF));
-    const txQueryFallback = isAdmin()
-      ? query(collection(db, 'transactions'), limit(TX_SYNC_LIMIT_ADMIN))
-      : query(collection(db, 'transactions'), where('user', '==', sanitizeUsername(currentUser.username)), limit(TX_SYNC_LIMIT_STAFF));
-    const attendanceQuery = isAdmin()
-      ? query(collection(db, 'attendance'), limit(ATT_SYNC_LIMIT_ADMIN))
-      : query(collection(db, 'attendance'), where('user', '==', sanitizeUsername(currentUser.username)), limit(ATT_SYNC_LIMIT_STAFF));
-    const manualBonusQuery = isAdmin()
-      ? query(collection(db, 'manualBonuses'), limit(MANUAL_BONUS_SYNC_LIMIT))
-      : query(collection(db, 'manualBonuses'), where('user', '==', sanitizeUsername(currentUser.username)), limit(MANUAL_BONUS_SYNC_LIMIT));
-
-    const [txSnap, attSnap, closingSnap, bonusSnap, guideNoteSnap, staffDailyNoteSnap, receiptTextSnap, manualBonusSnap] = await Promise.all([
+    const [txSnap, attSnap, closingSnap, bonusSnap, guideNoteSnap, receiptTextSnap, manualBonusSnap] = await Promise.all([
       getDocsFreshWithFallback('Transaksi terbaru', txQueryFresh, txQueryFallback).then(countError),
       getDocsFreshSafe('Absensi', attendanceQuery).then(countError),
       getDocsFreshSafe('Closing', query(collection(db, 'closings'), limit(CLOSING_SYNC_LIMIT))).then(countError),
       getDocFreshSafe('Setting bonus', doc(db, 'closings', '__bonus_settings')).then(countError),
       getDocFreshSafe('Catatan panduan header', doc(db, 'closings', HEADER_GUIDE_NOTE_DOC_ID)).then(countError),
-      getDocFreshSafe('Catatan home staff', doc(db, 'closings', STAFF_DAILY_NOTE_DOC_ID)).then(countError),
       getDocFreshSafe('Setting tulisan struk', doc(db, 'closings', RECEIPT_TEXT_DOC_ID)).then(countError),
       getDocsFreshSafe('Bonus manual', manualBonusQuery).then(countError)
     ]);
@@ -9178,16 +8528,6 @@ Masukkan PIN admin:`);
       cachedAttendance = dedupeAttendanceRecords(
         attSnap.docs.map(d => ({ id: d.id, ...d.data() })).filter(a => !isRecordDeleted(a))
       );
-      if (!isAdmin()) {
-        const today = toDateKey(nowDate());
-        const todayRec = cachedAttendance.find(a => !isRecordDeleted(a) && extractDateKey(a) === today && sanitizeUsername(a.user) === currentUser.username);
-        if (todayRec) {
-          const createdAtMs = getRecordTimeMs(todayRec) || Date.now();
-          saveAttendanceCache(currentUser.username, { dateKey: today, createdAtMs });
-        } else {
-          clearAttendanceCache(currentUser.username);
-        }
-      }
       attendanceReady = true;
     }
 
@@ -9212,12 +8552,6 @@ Masukkan PIN admin:`);
         : { id: HEADER_GUIDE_NOTE_DOC_ID, note: DEFAULT_HEADER_GUIDE_NOTE, updatedAtMs: 0, updatedBy: '', updatedByName: '' };
     }
 
-    if (staffDailyNoteSnap) {
-      cachedStaffDailyHomeNote = staffDailyNoteSnap.exists()
-        ? { id: staffDailyNoteSnap.id, note: DEFAULT_STAFF_DAILY_NOTE, enabled: true, ...(staffDailyNoteSnap.data() || {}) }
-        : { id: STAFF_DAILY_NOTE_DOC_ID, note: DEFAULT_STAFF_DAILY_NOTE, enabled: true, updatedAtMs: 0, updatedBy: '', updatedByName: '' };
-    }
-
     if (receiptTextSnap) {
       cachedReceiptTextSettings = receiptTextSnap.exists()
         ? normalizeReceiptTextSettings({ id: receiptTextSnap.id, ...(receiptTextSnap.data() || {}) })
@@ -9230,23 +8564,18 @@ Masukkan PIN admin:`);
       );
     }
 
-    if (isAdmin()) {
-      const [usersSnap, rismaSnap, auditSnap] = await Promise.all([
-        getDocsFreshSafe('User', query(collection(db, 'users'), orderBy('name'))).then(countError),
-        getDocFreshSafe('Closing manual Risma', doc(db, RISMA_MANUAL_CLOSING_COLLECTION, RISMA_MANUAL_CLOSING_DOC_ID)).then(countError),
-        getDocsFreshSafe('Audit log', query(collection(db, 'audit_logs'), orderBy('createdAt', 'desc'), limit(AUDIT_SYNC_LIMIT))).then(countError)
-      ]);
-      if (usersSnap) cachedUsers = usersSnap.docs.map(d => ({ id: d.id, ...d.data() }));
-      if (rismaSnap) {
-        cachedRismaManualClosingConfig = rismaSnap.exists()
-          ? { id: rismaSnap.id, enabled: true, allowedUsers: [], allowedNames: {}, ...(rismaSnap.data() || {}) }
-          : { id: RISMA_MANUAL_CLOSING_DOC_ID, enabled: true, allowedUsers: [], allowedNames: {} };
-      }
-      if (auditSnap) cachedAuditLogs = sortByCreatedDesc(auditSnap.docs.map(d => ({ id: d.id, ...d.data() })));
-    } else {
-      cachedUsers = currentUser ? [{ username: currentUser.username, name: currentUser.name, role: currentUser.role || 'staff', transactionBonusRate: currentUser.transactionBonusRate ?? null, transactionBonusPercent: currentUser.transactionBonusPercent ?? null, closingBonusPerMinute: currentUser.closingBonusPerMinute ?? null, dailyBonusRate: Number(currentUser.dailyBonusRate || 0), dailyBonusPercent: Number(currentUser.dailyBonusPercent || 0), active: true }] : [];
-      cachedAuditLogs = [];
+    const [usersSnap, rismaSnap, auditSnap] = await Promise.all([
+      getDocsFreshSafe('User', query(collection(db, 'users'), orderBy('name'))).then(countError),
+      getDocFreshSafe('Closing manual Risma', doc(db, RISMA_MANUAL_CLOSING_COLLECTION, RISMA_MANUAL_CLOSING_DOC_ID)).then(countError),
+      getDocsFreshSafe('Audit log', query(collection(db, 'audit_logs'), orderBy('createdAt', 'desc'), limit(AUDIT_SYNC_LIMIT))).then(countError)
+    ]);
+    if (usersSnap) cachedUsers = usersSnap.docs.map(d => ({ id: d.id, ...d.data() }));
+    if (rismaSnap) {
+      cachedRismaManualClosingConfig = rismaSnap.exists()
+        ? { id: rismaSnap.id, enabled: true, allowedUsers: [], allowedNames: {}, ...(rismaSnap.data() || {}) }
+        : { id: RISMA_MANUAL_CLOSING_DOC_ID, enabled: true, allowedUsers: [], allowedNames: {} };
     }
+    if (auditSnap) cachedAuditLogs = sortByCreatedDesc(auditSnap.docs.map(d => ({ id: d.id, ...d.data() })));
 
     applyNavRoleLabels();
     clearCashFisikCacheForRefresh();
@@ -9301,7 +8630,6 @@ Masukkan PIN admin:`);
       return;
     }
     lastForegroundRefreshAt = now;
-    preloadAttendanceCache();
     refreshCurrentPage();
     await refreshTransactionsNow();
   }
