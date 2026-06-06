@@ -975,6 +975,9 @@
   const RESTORABLE_PAGES = ['home','history','attendance','report','settings','closing','adminLogs'];
   const ADMIN_USERNAMES = ['admin'];
   const ADMIN_FCM_TOKEN_COLLECTION = 'adminDeviceTokens';
+  const ROCKY_NOTIFY_WORKER_BASE_URL = 'https://rocky-notif-worker.alfajrihanif24.workers.dev';
+  const ROCKY_NOTIFY_SECRET = 'rockyNotifRahasia2026';
+  const ROCKY_SERVER_REGISTER_TOKEN_URL = ROCKY_NOTIFY_WORKER_BASE_URL + '/register-server-token';
   // Web push Firebase tidak dipakai di mode Supabase. Untuk APK Android, token FCM native tetap bisa disimpan ke tabel adminDeviceTokens.
   const FCM_WEB_VAPID_KEY = '';
   const ADMIN_NOTIF_SEEN_KEY = 'rocky_admin_seen_transaction_notifications_v1';
@@ -1223,6 +1226,33 @@
     });
     saveAdminNotifSeenIds();
   }
+  async function registerNativeServerFcmToken(token, platform = 'android') {
+    const cleanToken = String(token || '').trim();
+    if (!cleanToken || !isAdmin()) return false;
+    try {
+      const res = await fetch(ROCKY_SERVER_REGISTER_TOKEN_URL, {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json', 'X-Notify-Secret': ROCKY_NOTIFY_SECRET },
+        body: JSON.stringify({
+          token: cleanToken,
+          platform: String(platform || 'android'),
+          app: 'server_rocky',
+          role: 'server',
+          username: sanitizeUsername(currentUser.username || 'server'),
+          name: currentUser.name || currentUser.username || 'Server Rocky',
+          device: 'server-android',
+          packageName: 'com.server.rocky',
+          secret: ROCKY_NOTIFY_SECRET
+        })
+      });
+      const data = await res.json().catch(() => null);
+      if (!res.ok || data?.ok === false) throw new Error(data?.error || 'Gagal daftar server token Cloudflare');
+      return true;
+    } catch (e) {
+      console.warn('Gagal daftar server token Cloudflare:', e?.message || e);
+      return false;
+    }
+  }
   async function saveNativeAdminFcmToken(token, platform = 'android') {
     const cleanToken = String(token || '').trim();
     if (!cleanToken || !isAdmin()) return false;
@@ -1239,7 +1269,8 @@
         updatedAtMs: Date.now(),
         userAgent: navigator.userAgent || ''
       }, { merge: true });
-      showToast('✓ Token notifikasi admin tersimpan');
+      await registerNativeServerFcmToken(cleanToken, platform);
+      showToast('Token notifikasi server tersimpan');
       return true;
     } catch (e) {
       console.warn('Gagal simpan token FCM admin:', e?.code || e?.message || e);
@@ -1255,6 +1286,8 @@
       console.log('Native FCM bridge belum tersedia:', e?.message || e);
     }
   }
+  window.saveNativeAdminFcmToken = saveNativeAdminFcmToken;
+  window.registerNativeServerFcmToken = registerNativeServerFcmToken;
   async function initAdminWebPush() {
     if (!isAdmin()) return;
     if (!('Notification' in window)) return;
