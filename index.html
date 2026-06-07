@@ -978,6 +978,7 @@
   const ROCKY_NOTIFY_WORKER_BASE_URL = 'https://rocky-notif-worker.alfajrihanif24.workers.dev';
   const ROCKY_NOTIFY_SECRET = 'rockyNotifRahasia2026';
   const ROCKY_SERVER_REGISTER_TOKEN_URL = ROCKY_NOTIFY_WORKER_BASE_URL + '/register-server-token';
+  const ROCKY_STAFF_NOTIFY_MANUAL_BONUS_URL = ROCKY_NOTIFY_WORKER_BASE_URL + '/notify-staff-manual-bonus';
   // Web push Firebase tidak dipakai di mode Supabase. Untuk APK Android, token FCM native tetap bisa disimpan ke tabel adminDeviceTokens.
   const FCM_WEB_VAPID_KEY = '';
   const ADMIN_NOTIF_SEEN_KEY = 'rocky_admin_seen_transaction_notifications_v1';
@@ -1252,6 +1253,56 @@
       console.warn('Gagal daftar server token Cloudflare:', e?.message || e);
       return false;
     }
+  }
+  function notifyRockyWorker(url, payload = {}, label = 'Notif Cloudflare') {
+    try {
+      if (!url || !ROCKY_NOTIFY_SECRET) return Promise.resolve(null);
+      return fetch(url, {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json', 'X-Notify-Secret': ROCKY_NOTIFY_SECRET },
+        body: JSON.stringify({ ...payload, secret: ROCKY_NOTIFY_SECRET })
+      }).then(async res => {
+        const data = await res.json().catch(() => null);
+        if (!res.ok || data?.ok === false) console.warn(`${label} gagal:`, data || res.status);
+        return data;
+      }).catch(e => {
+        console.warn(`${label} gagal:`, e?.message || e);
+        return null;
+      });
+    } catch (e) {
+      console.warn(`${label} gagal:`, e?.message || e);
+      return Promise.resolve(null);
+    }
+  }
+  function notifyStaffManualBonusFromServer(row = {}, user = null) {
+    const username = sanitizeUsername(row.user || row.username || '');
+    const amount = Number(row.amount || 0);
+    const action = String(row.action || (amount < 0 ? 'subtract' : 'add')).toLowerCase();
+    if (!username || amount <= 0 || action === 'subtract') return Promise.resolve(null);
+    const role = normalizeRole(row.userRole || row.role || user?.role || 'staff');
+    const daily = isDailyRole(role);
+    return notifyRockyWorker(ROCKY_STAFF_NOTIFY_MANUAL_BONUS_URL, {
+      targetUsername: username,
+      username,
+      user: username,
+      name: row.name || user?.name || username,
+      amount,
+      note: String(row.note || ''),
+      action: 'add',
+      dateKey: String(row.dateKey || ''),
+      monthKey: String(row.monthKey || ''),
+      bonusId: String(row.id || row.docId || row.clientRequestId || ''),
+      role,
+      userRole: role,
+      actualRole: role,
+      bonusGroup: daily ? 'harian' : 'staff',
+      isDaily: daily,
+      dailyMode: daily,
+      actualDaily: daily,
+      canReceiveStaffNotifications: true,
+      notificationAudience: 'staff',
+      createdByName: currentUser?.name || currentUser?.username || 'Server Rocky'
+    }, 'Notif bonus staff');
   }
   async function saveNativeAdminFcmToken(token, platform = 'android') {
     const cleanToken = String(token || '').trim();
@@ -2427,8 +2478,10 @@ Masukkan PIN admin:`);
         clientRequestId
       };
       const ref = await addDoc(collection(db, 'manualBonuses'), payload);
-      upsertManualBonusRecord({ id: ref.id, ...payload });
+      const savedManualBonus = { id: ref.id, ...payload };
+      upsertManualBonusRecord(savedManualBonus);
       await logAudit(mode === 'subtract' ? 'manual_bonus_subtract' : 'manual_bonus_add', { id: ref.id, user: username, name: user.name || username, role, amount, monthKey, note });
+      await notifyStaffManualBonusFromServer(savedManualBonus, user);
       const amountInput = $('manual-bonus-amount');
       const noteInput = $('manual-bonus-note');
       if (amountInput) { amountInput.value = ''; amountInput.setAttribute('data-numeric', '0'); }
