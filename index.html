@@ -2017,6 +2017,7 @@
         const rewardId = serverTargetRewardId(summary.dateKey, username);
         const existing = await getDocFromServer(doc(db, 'manualBonuses', bonusId)).catch(() => null);
         const role = normalizeRole(user.role || 'staff');
+        let staffNotificationSent = false;
         const payload = {
           user: username,
           targetUsername: username,
@@ -2039,7 +2040,8 @@
         if (!existing?.exists()) {
           await setDoc(doc(db, 'manualBonuses', bonusId), payload, { merge: false });
           upsertManualBonusRecord({ id: bonusId, ...payload });
-          await notifyStaffManualBonusFromServer({ id: bonusId, docId: bonusId, ...payload }, user);
+          const notifyResult = await notifyStaffManualBonusFromServer({ id: bonusId, docId: bonusId, ...payload }, user);
+          staffNotificationSent = !!notifyResult && notifyResult.ok !== false;
         }
         rewarded.push(username);
         await setDoc(doc(db, SERVER_TARGET_REWARDS_TABLE, rewardId), {
@@ -2052,7 +2054,8 @@
           type: 'daily_target_bonus',
           source: 'daily_target',
           rewardedAt: serverTimestamp(),
-          rewardedAtMs: Date.now()
+          rewardedAtMs: Date.now(),
+          ...(staffNotificationSent ? { staffNotificationSent: true, staffNotificationStatus: 'sent', staffNotifiedAt: serverTimestamp(), staffNotifiedAtMs: Date.now() } : {})
         }, { merge: true }).catch(() => {});
       }
       await serverSaveTargetStatus(summary, plan, { bonusApplied: true, rewardedUsers: rewarded });
