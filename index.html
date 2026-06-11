@@ -1294,6 +1294,8 @@
       dateKey: String(row.dateKey || ''),
       monthKey: String(row.monthKey || ''),
       bonusId: String(row.id || row.docId || row.clientRequestId || ''),
+      type: String(row.type || ''),
+      source: String(row.source || 'admin_manual_bonus'),
       role,
       userRole: role,
       actualRole: role,
@@ -2037,6 +2039,7 @@
         if (!existing?.exists()) {
           await setDoc(doc(db, 'manualBonuses', bonusId), payload, { merge: false });
           upsertManualBonusRecord({ id: bonusId, ...payload });
+          await notifyStaffManualBonusFromServer({ id: bonusId, docId: bonusId, ...payload }, user);
         }
         rewarded.push(username);
         await setDoc(doc(db, SERVER_TARGET_REWARDS_TABLE, rewardId), {
