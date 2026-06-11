@@ -541,7 +541,7 @@
   // === FIRESTORE COMPAT LAYER DI ATAS SUPABASE ===
   // Tujuannya menjaga logika aplikasi tetap sama: doc(), collection(), query(), where(), limit(), orderBy(),
   // getDoc(), getDocs(), setDoc(), addDoc(), deleteDoc(), onSnapshot(), serverTimestamp(), Timestamp.fromMillis().
-  const SUPABASE_TABLES = ['users','attendance','transactions','closings','manualBonuses','audit_logs','adminDeviceTokens'];
+  const SUPABASE_TABLES = ['users','attendance','transactions','closings','manualBonuses','staff_leave_requests','audit_logs','adminDeviceTokens'];
   const SUPABASE_FALLBACK_POLL_MS = 2 * 60 * 1000;
   const SUPABASE_REALTIME_DEBOUNCE_MS = 450;
   const SERVER_TIMESTAMP_SENTINEL = { __supabaseServerTimestamp: true };
@@ -802,6 +802,7 @@
     if (unsubClosings) { unsubClosings(); unsubClosings = null; }
     if (unsubBonusSettings) { unsubBonusSettings(); unsubBonusSettings = null; }
     if (unsubManualBonuses) { unsubManualBonuses(); unsubManualBonuses = null; }
+    if (unsubUnlockRequests) { unsubUnlockRequests(); unsubUnlockRequests = null; }
     if (unsubRismaManualClosing) { unsubRismaManualClosing(); unsubRismaManualClosing = null; }
     if (unsubHeaderGuideNote) { unsubHeaderGuideNote(); unsubHeaderGuideNote = null; }
     if (unsubReceiptTextSettings) { unsubReceiptTextSettings(); unsubReceiptTextSettings = null; }
@@ -828,6 +829,8 @@
         upsertAttendanceRecord(rec);
       } else if (collectionName === 'manualBonuses') {
         upsertManualBonusRecord(rec);
+      } else if (collectionName === STAFF_UNLOCK_TABLE) {
+        cachedUnlockRequests = sortByCreatedDesc([rec, ...(cachedUnlockRequests || []).filter(r => String(r.id) !== rec.id)]);
       } else if (collectionName === 'users') {
         upsertCachedUserFromServer(rec.id, rec);
       } else if (collectionName === 'audit_logs') {
@@ -851,6 +854,7 @@
       if (collectionName === 'transactions') cachedTransactions = (cachedTransactions || []).filter(t => String(t.id) !== safeId);
       else if (collectionName === 'attendance') cachedAttendance = (cachedAttendance || []).filter(a => String(a.id) !== safeId);
       else if (collectionName === 'manualBonuses') cachedManualBonuses = (cachedManualBonuses || []).filter(b => String(b.id) !== safeId);
+      else if (collectionName === STAFF_UNLOCK_TABLE) cachedUnlockRequests = (cachedUnlockRequests || []).filter(r => String(r.id) !== safeId);
       else if (collectionName === 'users') cachedUsers = (cachedUsers || []).filter(u => sanitizeUsername(u.username || u.id) !== sanitizeUsername(safeId));
       else if (collectionName === 'closings') cachedClosings = (cachedClosings || []).filter(c => String(c.id) !== safeId);
       else if (collectionName === 'audit_logs') cachedAuditLogs = (cachedAuditLogs || []).filter(l => String(l.id) !== safeId);
@@ -979,6 +983,7 @@
   const ROCKY_NOTIFY_SECRET = 'rockyNotifRahasia2026';
   const ROCKY_SERVER_REGISTER_TOKEN_URL = ROCKY_NOTIFY_WORKER_BASE_URL + '/register-server-token';
   const ROCKY_STAFF_NOTIFY_MANUAL_BONUS_URL = ROCKY_NOTIFY_WORKER_BASE_URL + '/notify-staff-manual-bonus';
+  const ROCKY_STAFF_NOTIFY_UNLOCK_REVIEW_URL = ROCKY_NOTIFY_WORKER_BASE_URL + '/notify-staff-unlock-review';
   const ROCKY_NOTIFY_TARGET_URL = ROCKY_NOTIFY_WORKER_BASE_URL + '/notify-target-achieved';
   // Web push Firebase tidak dipakai di mode Supabase. Untuk APK Android, token FCM native tetap bisa disimpan ke tabel adminDeviceTokens.
   const FCM_WEB_VAPID_KEY = '';
@@ -992,7 +997,7 @@
   let currentUser = null, currentPos = null, currentPage = 'login', historyFilter = 'daily', reportFilter = 'daily', reportMonthKey = '', selectedUserFilter = 'all';
   let appPageHistoryStack = [], appBackNavigating = false;
   let selectedRestoreProFile = null;
-  let cachedTransactions = [], cachedAttendance = [], cachedUsers = [], cachedAuditLogs = [], cachedClosings = [], cachedManualBonuses = [];
+  let cachedTransactions = [], cachedAttendance = [], cachedUsers = [], cachedAuditLogs = [], cachedClosings = [], cachedManualBonuses = [], cachedUnlockRequests = [];
   let cachedDailyTarget = null, cachedTargetNotification = null, cachedTargetSettings = {}, serverTargetApplyTimer = 0, serverTargetApplying = false;
   let adminNotifBootstrapped = false;
   let adminNotifSeenIds = new Set();
@@ -1001,7 +1006,7 @@
   let cachedStaffDailyHomeNote = { id: STAFF_DAILY_NOTE_DOC_ID, note: DEFAULT_STAFF_DAILY_NOTE, enabled: true, updatedAtMs: 0, updatedBy: '', updatedByName: '' };
   let cachedReceiptTextSettings = { id: RECEIPT_TEXT_DOC_ID, ...DEFAULT_RECEIPT_TEXT_SETTINGS, updatedAtMs: 0, updatedBy: '', updatedByName: '' };
   let cachedRismaManualClosingConfig = { id: '__risma_manual_closing', enabled: true, allowedUsers: [], allowedNames: {} };
-  let unsubTransactions = null, unsubAttendance = null, unsubUsers = null, unsubAuditLogs = null, unsubClosings = null, unsubBonusSettings = null, unsubManualBonuses = null, unsubRismaManualClosing = null, unsubHeaderGuideNote = null, unsubReceiptTextSettings = null, rangeStartDate = null, rangeEndDate = null;
+  let unsubTransactions = null, unsubAttendance = null, unsubUsers = null, unsubAuditLogs = null, unsubClosings = null, unsubBonusSettings = null, unsubManualBonuses = null, unsubUnlockRequests = null, unsubRismaManualClosing = null, unsubHeaderGuideNote = null, unsubReceiptTextSettings = null, rangeStartDate = null, rangeEndDate = null;
   let attendanceReady = false, isBusy = false, auditLogLimit = 10, recycleBinLimit = 20, recycleSearch = '', recycleUserFilter = 'all', historyDisplayLimit = 30, inactiveUserLimit = 30, adminMoreOpen = false;
   let attendancePageUserFilter = 'all', attendancePageDateFilter = toDateKey(nowDate()), attendancePageShowDeleted = false, attendancePageLimit = 30;
   let adminProCurrentPageKey = '';
@@ -1010,6 +1015,7 @@
   const DEFAULT_CLOSING_DEADLINE_HOUR = 18, DEFAULT_CLOSING_DEADLINE_MINUTE = 0, DEFAULT_CLOSING_DEADLINE_TIME = '18:00', DEFAULT_CLOSING_BONUS_PER_MINUTE = 100, DEFAULT_TRANSACTION_BONUS_RATE = 0.015;
   const RISMA_MANUAL_CLOSING_DOC_ID = '__risma_manual_closing';
   const RISMA_MANUAL_CLOSING_COLLECTION = 'closings';
+  const STAFF_UNLOCK_TABLE = 'staff_leave_requests';
   let appSwipeStartX = 0, appSwipeStartY = 0, appSwipeStartT = 0;
   let adminClosingPanelHash = '', adminDashboardPanelsHash = '';
   let clockInInFlight = false;
@@ -1307,6 +1313,24 @@
       notificationAudience: 'staff',
       createdByName: currentUser?.name || currentUser?.username || 'Server Rocky'
     }, 'Notif bonus staff');
+  }
+  function notifyStaffUnlockReviewFromServer(row = {}, status = 'approved') {
+    const username = sanitizeUsername(row.user || row.username || '');
+    if (!username) return Promise.resolve(null);
+    return notifyRockyWorker(ROCKY_STAFF_NOTIFY_UNLOCK_REVIEW_URL, {
+      targetUsername: username,
+      username,
+      user: username,
+      name: row.name || getUserByUsername(username)?.name || username,
+      status: String(status || row.status || ''),
+      unlockId: String(row.id || row.docId || ''),
+      lockId: String(row.lockId || row.parentLockId || ''),
+      missedDate: String(row.missedDate || ''),
+      targetDate: String(row.targetDate || row.dateKey || ''),
+      dateKey: String(row.dateKey || ''),
+      reason: String(row.reason || row.note || ''),
+      updatedByName: currentUser?.name || currentUser?.username || 'Server Rocky'
+    }, 'Notif review buka fitur staff');
   }
   async function saveNativeAdminFcmToken(token, platform = 'android') {
     const cleanToken = String(token || '').trim();
@@ -1943,6 +1967,68 @@
       console.warn('notify target server gagal', e?.message || e);
     }
   }
+  async function serverEnsureStaffTargetBonusNotification(summary, user, amount) {
+    const username = sanitizeUsername(user?.username || user?.id || '');
+    if (!username || Number(amount || 0) <= 0) return false;
+    const bonusId = serverTargetBonusId(summary.dateKey, username);
+    const rewardId = serverTargetRewardId(summary.dateKey, username);
+    try {
+      const rewardSnap = await getDocFromServer(doc(db, SERVER_TARGET_REWARDS_TABLE, rewardId)).catch(() => null);
+      const reward = rewardSnap?.exists() ? (rewardSnap.data() || {}) : {};
+      if (reward.staffNotificationSent === true || Number(reward.staffNotifiedAtMs || 0) > 0) return false;
+      const role = normalizeRole(user.role || 'staff');
+      const fallback = {
+        id: bonusId,
+        user: username,
+        targetUsername: username,
+        name: user.name || username,
+        userRole: role,
+        role,
+        bonusGroup: 'staff',
+        amount,
+        dateKey: summary.dateKey,
+        monthKey: summary.dateKey.slice(0, 7),
+        type: 'daily_target_bonus',
+        source: 'daily_target',
+        note: 'Bonus target omzet harian tercapai',
+        description: 'Bonus otomatis karena target omzet harian gabungan tercapai',
+        action: 'add',
+        deleted: false
+      };
+      const bonusSnap = await getDocFromServer(doc(db, 'manualBonuses', bonusId)).catch(() => null);
+      const row = bonusSnap?.exists() ? { ...fallback, ...(bonusSnap.data() || {}), id: bonusId, docId: bonusId } : fallback;
+      const notifyResult = await notifyStaffManualBonusFromServer(row, user);
+      const sent = !!notifyResult && notifyResult.ok !== false;
+      if (!sent) return false;
+      await setDoc(doc(db, SERVER_TARGET_REWARDS_TABLE, rewardId), {
+        id: rewardId,
+        dateKey: summary.dateKey,
+        user: username,
+        targetUsername: username,
+        amount,
+        manualBonusId: bonusId,
+        type: 'daily_target_bonus',
+        source: 'daily_target',
+        staffNotificationSent: true,
+        staffNotificationStatus: 'sent',
+        staffNotifiedAt: serverTimestamp(),
+        staffNotifiedAtMs: Date.now()
+      }, { merge: true }).catch(() => {});
+      return true;
+    } catch (e) {
+      console.warn('ensure notif bonus target server gagal', e?.code || e?.message || e);
+      return false;
+    }
+  }
+  async function serverEnsureStaffTargetBonusNotifications(summary, plan, amount) {
+    const sent = [];
+    if (Number(amount || 0) <= 0) return sent;
+    for (const user of plan.users || []) {
+      const ok = await serverEnsureStaffTargetBonusNotification(summary, user, amount);
+      if (ok) sent.push(sanitizeUsername(user.username || user.id));
+    }
+    return sent;
+  }
   async function serverSaveTargetStatus(summary, plan, extra = {}) {
     const current = cachedDailyTarget || {};
     const payload = {
@@ -2002,12 +2088,13 @@
         await serverSaveTargetStatus(summary, plan, {});
         return;
       }
+      const amount = Number(summary.bonusAmount || 0);
       if (cachedDailyTarget?.bonusApplied === true) {
+        await serverEnsureStaffTargetBonusNotifications(summary, plan, amount);
         await serverSaveTargetStatus(summary, plan, { bonusApplied: true, rewardedUsers: cachedDailyTarget.rewardedUsers || [] });
         return;
       }
       await serverSaveTargetStatus(summary, plan, {});
-      const amount = Number(summary.bonusAmount || 0);
       if (amount <= 0) return;
       const rewarded = [];
       for (const user of plan.users) {
@@ -2042,6 +2129,8 @@
           upsertManualBonusRecord({ id: bonusId, ...payload });
           const notifyResult = await notifyStaffManualBonusFromServer({ id: bonusId, docId: bonusId, ...payload }, user);
           staffNotificationSent = !!notifyResult && notifyResult.ok !== false;
+        } else {
+          staffNotificationSent = await serverEnsureStaffTargetBonusNotification(summary, user, amount);
         }
         rewarded.push(username);
         await setDoc(doc(db, SERVER_TARGET_REWARDS_TABLE, rewardId), {
@@ -3531,6 +3620,7 @@ ${lockedByGlobal ? 'Hanya user ini yang dibuka dari closing global. Bonus closin
       cachedAuditLogs = [];
       cachedClosings = [];
       cachedManualBonuses = [];
+      cachedUnlockRequests = [];
       cachedRismaManualClosingConfig = { id: RISMA_MANUAL_CLOSING_DOC_ID, enabled: true, allowedUsers: [], allowedNames: {} };
       cachedHeaderGuideNote = { id: HEADER_GUIDE_NOTE_DOC_ID, note: DEFAULT_HEADER_GUIDE_NOTE, updatedAtMs: 0, updatedBy: '', updatedByName: '' };
     cachedReceiptTextSettings = { id: RECEIPT_TEXT_DOC_ID, ...DEFAULT_RECEIPT_TEXT_SETTINGS, updatedAtMs: 0, updatedBy: '', updatedByName: '' };
@@ -3566,6 +3656,7 @@ ${lockedByGlobal ? 'Hanya user ini yang dibuka dari closing global. Bonus closin
     cachedAuditLogs = [];
     cachedClosings = [];
     cachedManualBonuses = [];
+    cachedUnlockRequests = [];
     cachedRismaManualClosingConfig = { id: RISMA_MANUAL_CLOSING_DOC_ID, enabled: true, allowedUsers: [], allowedNames: {} };
     cachedHeaderGuideNote = { id: HEADER_GUIDE_NOTE_DOC_ID, note: DEFAULT_HEADER_GUIDE_NOTE, updatedAtMs: 0, updatedBy: '', updatedByName: '' };
     cachedReceiptTextSettings = { id: RECEIPT_TEXT_DOC_ID, ...DEFAULT_RECEIPT_TEXT_SETTINGS, updatedAtMs: 0, updatedBy: '', updatedByName: '' };
@@ -3611,6 +3702,7 @@ ${lockedByGlobal ? 'Hanya user ini yang dibuka dari closing global. Bonus closin
       cachedAuditLogs = [];
       cachedClosings = [];
       cachedManualBonuses = [];
+      cachedUnlockRequests = [];
       cachedRismaManualClosingConfig = { id: RISMA_MANUAL_CLOSING_DOC_ID, enabled: true, allowedUsers: [], allowedNames: {} };
       cachedHeaderGuideNote = { id: HEADER_GUIDE_NOTE_DOC_ID, note: DEFAULT_HEADER_GUIDE_NOTE, updatedAtMs: 0, updatedBy: '', updatedByName: '' };
     cachedReceiptTextSettings = { id: RECEIPT_TEXT_DOC_ID, ...DEFAULT_RECEIPT_TEXT_SETTINGS, updatedAtMs: 0, updatedBy: '', updatedByName: '' };
@@ -3706,6 +3798,12 @@ ${lockedByGlobal ? 'Hanya user ini yang dibuka dari closing global. Bonus closin
       serverScheduleDailyTargetCheck();
       refreshCurrentPage();
     }, (err) => console.error('Manual bonus listener gagal:', err));
+
+    const unlockQ = query(collection(db, STAFF_UNLOCK_TABLE), limit(160));
+    unsubUnlockRequests = onSnapshot(unlockQ, (snap) => {
+      cachedUnlockRequests = snap.docs.map(d => ({ id: d.id, ...d.data() }));
+      refreshCurrentPage();
+    }, (err) => console.error('Buka fitur listener gagal:', err));
 
     const uq = query(collection(db, 'users'), orderBy('name'));
     unsubUsers = onSnapshot(uq, (snap) => {
@@ -6834,6 +6932,7 @@ Masukkan PIN admin:`);
     cachedAuditLogs = [];
     cachedClosings = [];
     cachedManualBonuses = [];
+    cachedUnlockRequests = [];
     cachedRismaManualClosingConfig = { id: RISMA_MANUAL_CLOSING_DOC_ID, enabled: true, allowedUsers: [], allowedNames: {} };
     cachedHeaderGuideNote = { id: HEADER_GUIDE_NOTE_DOC_ID, note: DEFAULT_HEADER_GUIDE_NOTE, updatedAtMs: 0, updatedBy: '', updatedByName: '' };
       cachedStaffDailyHomeNote = { id: STAFF_DAILY_NOTE_DOC_ID, note: DEFAULT_STAFF_DAILY_NOTE, enabled: true, updatedAtMs: 0, updatedBy: '', updatedByName: '' };
@@ -7994,10 +8093,188 @@ Masukkan PIN admin:`);
       <p style="font-size:11px;color:var(--text-soft);margin-top:10px">Hapus biasa hanya memindahkan data ke recycle bin. Gunakan filter untuk cari data tertentu, atau hapus/pulihkan semua hasil filter sekaligus.</p>`;
   }
 
+  function isFeatureUnlockRequest(row) {
+    return String(row?.requestKind || '') === 'unlock'
+      || String(row?.action || row?.type || '') === 'feature_unlock_request'
+      || row?.featureUnlockRequest === true;
+  }
+  function unlockStatus(row) {
+    const status = sanitizeUsername(row?.status || 'pending');
+    if (status === 'approved' || status === 'diterima') return 'approved';
+    if (status === 'rejected' || status === 'ditolak') return 'rejected';
+    if (status === 'cancelled' || status === 'batal') return 'cancelled';
+    return 'pending';
+  }
+  function unlockStatusText(row) {
+    const status = unlockStatus(row);
+    if (status === 'approved') return 'Dibuka';
+    if (status === 'rejected') return 'Ditolak';
+    if (status === 'cancelled') return 'Dibatalkan';
+    return 'Menunggu';
+  }
+  function unlockStatusClass(row) {
+    const status = unlockStatus(row);
+    return status === 'approved' ? 'status-ok' : 'status-warn';
+  }
+  function unlockTimeMs(row) {
+    return Number(row?.createdAtMs || row?.updatedAtMs || row?.reviewedAtMs || row?.approvedAtMs || row?.rejectedAtMs || 0);
+  }
+  function formatUnlockTime(row) {
+    const n = unlockTimeMs(row);
+    if (!n) return '-';
+    return new Date(n).toLocaleString('id-ID', { timeZone:'Asia/Jakarta', day:'2-digit', month:'short', hour:'2-digit', minute:'2-digit' }).replace(/\./g, ':');
+  }
+  function isMissedAttendanceUnlock(row) {
+    const kind = sanitizeUsername(row?.lockKind || row?.reasonKind || row?.unlockKind || '');
+    return isFeatureUnlockRequest(row) && (row?.missingAttendance === true || kind === 'missed_attendance' || kind === 'absen_kemarin' || String(row?.source || '') === 'staff_app_missed_attendance_unlock');
+  }
+  function unlockRequestRows() {
+    return (cachedUnlockRequests || [])
+      .filter(row => isFeatureUnlockRequest(row) && !isRecordDeleted(row))
+      .sort((a, b) => unlockTimeMs(b) - unlockTimeMs(a));
+  }
+  function pendingUnlockCount() {
+    return unlockRequestRows().filter(row => unlockStatus(row) === 'pending').length;
+  }
+  function unlockRequestMeta(row) {
+    return {
+      missed: String(row?.missedDate || row?.missingDate || row?.previousDate || '').slice(0, 10),
+      target: String(row?.targetDate || row?.workDate || row?.dateKey || '').slice(0, 10)
+    };
+  }
+  function mergeUnlockRequestCache(id, patch = {}) {
+    const safeId = String(id || '');
+    if (!safeId) return;
+    const idx = (cachedUnlockRequests || []).findIndex(row => String(row.id) === safeId);
+    if (idx >= 0) cachedUnlockRequests[idx] = { ...cachedUnlockRequests[idx], ...patch, id: safeId };
+    else cachedUnlockRequests = [{ id: safeId, ...patch }, ...(cachedUnlockRequests || [])];
+    cachedUnlockRequests = unlockRequestRows();
+  }
+  function renderUnlockRequestCard(row) {
+    const meta = unlockRequestMeta(row);
+    const pending = unlockStatus(row) === 'pending';
+    const username = sanitizeUsername(row.user || row.username || '');
+    const user = getUserByUsername(username);
+    const title = isMissedAttendanceUnlock(row) ? 'Tidak absen hari sebelumnya' : 'Minta buka fitur';
+    const reason = String(row.reason || row.note || '-');
+    const name = row.name || user?.name || username || 'Staff';
+    const id = escapeHtml(row.id || '');
+    const actions = pending
+      ? `<div style="display:flex;gap:6px;justify-content:flex-end;margin-top:8px;flex-wrap:wrap">
+          <button onclick="reviewUnlockRequestFromServer('${id}','approved')" class="btn btn-primary" style="width:34px;height:34px;padding:0;border-radius:10px" title="Buka"><i class="fas fa-check"></i></button>
+          <button onclick="reviewUnlockRequestFromServer('${id}','rejected')" class="btn btn-danger" style="width:34px;height:34px;padding:0;border-radius:10px" title="Tolak"><i class="fas fa-xmark"></i></button>
+          <button onclick="deleteUnlockRequestFromServer('${id}')" class="btn btn-danger" style="width:34px;height:34px;padding:0;border-radius:10px" title="Hapus"><i class="fas fa-trash"></i></button>
+        </div>`
+      : `<div style="display:flex;gap:6px;justify-content:flex-end;margin-top:8px"><button onclick="deleteUnlockRequestFromServer('${id}')" class="btn btn-danger" style="width:34px;height:34px;padding:0;border-radius:10px" title="Hapus"><i class="fas fa-trash"></i></button></div>`;
+    return `
+      <div class="card" style="padding:11px 12px;margin-bottom:8px">
+        <div style="display:flex;justify-content:space-between;gap:10px;align-items:flex-start">
+          <div style="min-width:0">
+            <div style="font-size:13px;font-weight:850;color:var(--text);white-space:nowrap;overflow:hidden;text-overflow:ellipsis">${escapeHtml(name)}</div>
+            <div style="font-size:10.5px;color:var(--text-soft);margin-top:3px">@${escapeHtml(username || '-')} - ${escapeHtml(title)}</div>
+            <div style="font-size:10.5px;color:var(--text-soft);margin-top:3px">${meta.missed ? `Tidak absen ${escapeHtml(formatDateLabel(meta.missed))}` : ''}${meta.target ? `${meta.missed ? ' - ' : ''}Target ${escapeHtml(formatDateLabel(meta.target))}` : ''}</div>
+            <div style="font-size:10.5px;color:var(--text-soft);margin-top:3px">Alasan: ${escapeHtml(reason)}</div>
+            <div style="font-size:10px;color:var(--text-ghost);margin-top:3px">Dikirim: ${escapeHtml(formatUnlockTime(row))}</div>
+          </div>
+          <div style="flex-shrink:0;text-align:right;min-width:106px">
+            <span class="status-pill ${unlockStatusClass(row)}" style="font-size:10px;padding:5px 9px">${escapeHtml(unlockStatusText(row))}</span>
+            ${actions}
+          </div>
+        </div>
+      </div>`;
+  }
+  function renderUnlockRequestsBody() {
+    const rows = unlockRequestRows();
+    const pending = rows.filter(row => unlockStatus(row) === 'pending').length;
+    const approved = rows.filter(row => unlockStatus(row) === 'approved').length;
+    const rejected = rows.filter(row => unlockStatus(row) === 'rejected').length;
+    return `
+      <div style="display:grid;grid-template-columns:1fr 1fr 1fr;gap:8px;margin-bottom:10px">
+        <div class="card" style="padding:10px 11px"><p class="label-xs" style="margin-bottom:5px;font-size:9px">Menunggu</p><p style="font-family:var(--num-font);font-size:18px;font-weight:850;color:var(--amber);line-height:1">${pending}</p></div>
+        <div class="card" style="padding:10px 11px"><p class="label-xs" style="margin-bottom:5px;font-size:9px">Dibuka</p><p style="font-family:var(--num-font);font-size:18px;font-weight:850;color:var(--green);line-height:1">${approved}</p></div>
+        <div class="card" style="padding:10px 11px"><p class="label-xs" style="margin-bottom:5px;font-size:9px">Ditolak</p><p style="font-family:var(--num-font);font-size:18px;font-weight:850;color:var(--red);line-height:1">${rejected}</p></div>
+      </div>
+      <div style="display:flex;justify-content:flex-end;gap:8px;margin-bottom:10px">
+        <button onclick="manualRefreshData()" class="btn btn-glass" style="padding:9px 11px;font-size:11px"><i class="fas fa-rotate"></i> Refresh</button>
+      </div>
+      ${rows.length ? rows.map(renderUnlockRequestCard).join('') : `<div class="card" style="padding:16px;color:var(--text-soft);font-size:12px">Belum ada permintaan buka fitur.</div>`}
+      <p style="font-size:11px;color:var(--text-soft);margin-top:10px">Riwayat tetap tampil setelah dibuka atau ditolak. Tombol hapus hanya menyembunyikan riwayat request.</p>`;
+  }
+  async function reviewUnlockRequestFromServer(id, status) {
+    const row = unlockRequestRows().find(item => String(item.id) === String(id));
+    if (!row) return showToast('Request tidak ditemukan', true);
+    const next = status === 'approved' ? 'approved' : 'rejected';
+    const label = next === 'approved' ? 'Buka fitur' : 'Tolak request';
+    const pin = await askPin(`${label} untuk ${row.name || getUserByUsername(row.user)?.name || row.user || 'staff'}?\n\nMasukkan PIN admin:`);
+    if (!pin) return;
+    if (!(await requireCurrentAdminPin(pin))) return;
+    setLoading(true);
+    try {
+      const nowMs = Date.now();
+      const patch = {
+        status: next,
+        adminRead: true,
+        reviewedAt: serverTimestamp(),
+        reviewedAtMs: nowMs,
+        reviewedBy: currentUser.username,
+        reviewedByName: currentUser.name,
+        updatedAt: serverTimestamp(),
+        updatedAtMs: nowMs,
+        updatedBy: currentUser.username,
+        updatedByName: currentUser.name
+      };
+      if (next === 'approved') Object.assign(patch, { approvedAt: serverTimestamp(), approvedAtMs: nowMs, approvedBy: currentUser.username, approvedByName: currentUser.name, featureOpened: true });
+      else Object.assign(patch, { rejectedAt: serverTimestamp(), rejectedAtMs: nowMs, rejectedBy: currentUser.username, rejectedByName: currentUser.name, featureOpened: false });
+      await setDoc(doc(db, STAFF_UNLOCK_TABLE, id), patch, { merge: true });
+      mergeUnlockRequestCache(id, { ...row, ...patch });
+      await notifyStaffUnlockReviewFromServer({ ...row, ...patch, id }, next);
+      showToast(next === 'approved' ? 'Fitur staff dibuka' : 'Request ditolak');
+      openAdminProPage('unlock_requests');
+    } catch (e) {
+      showToast(e?.message || 'Gagal update request', true);
+    } finally {
+      setLoading(false);
+    }
+  }
+  async function deleteUnlockRequestFromServer(id) {
+    const row = (cachedUnlockRequests || []).find(item => String(item.id) === String(id));
+    if (!row || isRecordDeleted(row)) return showToast('Request tidak ditemukan', true);
+    const username = sanitizeUsername(row.user || row.username || '');
+    const pin = await askPin(`Hapus riwayat buka fitur untuk ${row.name || getUserByUsername(username)?.name || username || 'staff'}?\nStatus: ${unlockStatusText(row)}\n\nMasukkan PIN admin:`);
+    if (!pin) return;
+    if (!(await requireCurrentAdminPin(pin))) return;
+    if (!confirm('Yakin hapus riwayat buka fitur ini? Status buka/tolak yang sudah dibuat tidak diubah.')) return;
+    setLoading(true);
+    try {
+      const nowMs = Date.now();
+      const patch = {
+        deleted: true,
+        adminRead: true,
+        deletedAt: serverTimestamp(),
+        deletedAtMs: nowMs,
+        deletedBy: currentUser.username,
+        deletedByName: currentUser.name,
+        updatedAt: serverTimestamp(),
+        updatedAtMs: nowMs,
+        updatedBy: currentUser.username,
+        updatedByName: currentUser.name
+      };
+      await setDoc(doc(db, STAFF_UNLOCK_TABLE, id), patch, { merge: true });
+      mergeUnlockRequestCache(id, { ...row, ...patch });
+      showToast('Riwayat buka fitur dihapus');
+      openAdminProPage('unlock_requests');
+    } catch (e) {
+      showToast(e?.message || 'Gagal hapus request', true);
+    } finally {
+      setLoading(false);
+    }
+  }
+
 
   function renderAdminProPageBody(key) {
     if (key === 'attendance') return renderAdminAttendancePerformanceBody();
     if (key === 'manual_bonus') return renderManualBonusCard();
+    if (key === 'unlock_requests') return renderUnlockRequestsBody();
     if (key === 'receipt_text') return renderReceiptTextSettingsBody();
     if (key === 'daily_employee') return renderDailyEmployeeControlBody();
     if (key === 'user_management') return renderUserManagementBody(activeUsers().length);
@@ -8015,7 +8292,7 @@ Masukkan PIN admin:`);
   function openAdminProPage(key) {
     if (!isAdmin()) return router.navigate('home');
     const titles = {
-      attendance:'Performa Absen Staff', manual_bonus:'Tambah Bonus Manual', receipt_text:'Setting Tulisan Struk', daily_employee:'Kontrol Bonus Khusus User', user_management:'Manajemen User', backup_restore:'Backup, Reset & Restore', deleted_data:'Data Terhapus'
+      attendance:'Performa Absen Staff', manual_bonus:'Tambah Bonus Manual', unlock_requests:'Buka Fitur Staff', receipt_text:'Setting Tulisan Struk', daily_employee:'Kontrol Bonus Khusus User', user_management:'Manajemen User', backup_restore:'Backup, Reset & Restore', deleted_data:'Data Terhapus'
     };
     const safeKey = String(key || '').trim();
     if (!adminProCurrentPageKey) {
@@ -8062,6 +8339,7 @@ Masukkan PIN admin:`);
     const adminMenuCards = isAdmin() ? [
       ['attendance','Performa Absen Staff', 'Rata-rata jam absen bulanan staff', 'fa-user-clock'],
       ['manual_bonus','Tambah Bonus Manual', 'Tambah bonus ke staff/harian pilihan', 'fa-hand-holding-dollar'],
+      ['unlock_requests','Buka Fitur Staff', `${pendingUnlockCount()} menunggu review`, 'fa-unlock-keyhole'],
       ['receipt_text','Setting Tulisan Struk', 'Ubah nama toko, label, footer, dan jarak sobek', 'fa-receipt'],
       ['daily_employee','Kontrol Bonus Khusus User', 'Atur bonus transaksi per user langsung', 'fa-user-tag'],
       ['user_management','Manajemen User', 'Tambah, edit, nonaktifkan user', 'fa-users-gear'],
@@ -8794,6 +9072,8 @@ Masukkan PIN admin:`);
   window.updateReceiptSettingsPreview = updateReceiptSettingsPreview;
   window.formatMoneyInputElement = formatMoneyInputElement;
   window.openAdminProPage = openAdminProPage;
+  window.reviewUnlockRequestFromServer = reviewUnlockRequestFromServer;
+  window.deleteUnlockRequestFromServer = deleteUnlockRequestFromServer;
   window.openEditTransactionModal = openEditTransactionModal;
   window.saveEditedTransaction = saveEditedTransaction;
   window.handleTransactionModalSave = handleTransactionModalSave;
@@ -8916,15 +9196,17 @@ Masukkan PIN admin:`);
     const txQueryFallback = query(collection(db, 'transactions'), limit(TX_SYNC_LIMIT_ADMIN));
     const attendanceQuery = query(collection(db, 'attendance'), limit(ATT_SYNC_LIMIT_ADMIN));
     const manualBonusQuery = query(collection(db, 'manualBonuses'), limit(MANUAL_BONUS_SYNC_LIMIT));
+    const unlockRequestQuery = query(collection(db, STAFF_UNLOCK_TABLE), limit(160));
 
-    const [txSnap, attSnap, closingSnap, bonusSnap, guideNoteSnap, receiptTextSnap, manualBonusSnap] = await Promise.all([
+    const [txSnap, attSnap, closingSnap, bonusSnap, guideNoteSnap, receiptTextSnap, manualBonusSnap, unlockRequestSnap] = await Promise.all([
       getDocsFreshWithFallback('Transaksi terbaru', txQueryFresh, txQueryFallback).then(countError),
       getDocsFreshSafe('Absensi', attendanceQuery).then(countError),
       getDocsFreshSafe('Closing', query(collection(db, 'closings'), limit(CLOSING_SYNC_LIMIT))).then(countError),
       getDocFreshSafe('Setting bonus', doc(db, 'closings', '__bonus_settings')).then(countError),
       getDocFreshSafe('Catatan panduan header', doc(db, 'closings', HEADER_GUIDE_NOTE_DOC_ID)).then(countError),
       getDocFreshSafe('Setting tulisan struk', doc(db, 'closings', RECEIPT_TEXT_DOC_ID)).then(countError),
-      getDocsFreshSafe('Bonus manual', manualBonusQuery).then(countError)
+      getDocsFreshSafe('Bonus manual', manualBonusQuery).then(countError),
+      getDocsFreshSafe('Buka fitur staff', unlockRequestQuery).then(countError)
     ]);
 
     if (txSnap) {
@@ -8970,6 +9252,10 @@ Masukkan PIN admin:`);
       cachedManualBonuses = dedupeManualBonusRecords(
         manualBonusSnap.docs.map(d => ({ id: d.id, ...d.data() }))
       );
+    }
+
+    if (unlockRequestSnap) {
+      cachedUnlockRequests = unlockRequestSnap.docs.map(d => ({ id: d.id, ...d.data() }));
     }
 
     const [usersSnap, rismaSnap, auditSnap] = await Promise.all([
