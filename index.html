@@ -541,7 +541,7 @@
   // === FIRESTORE COMPAT LAYER DI ATAS SUPABASE ===
   // Tujuannya menjaga logika aplikasi tetap sama: doc(), collection(), query(), where(), limit(), orderBy(),
   // getDoc(), getDocs(), setDoc(), addDoc(), deleteDoc(), onSnapshot(), serverTimestamp(), Timestamp.fromMillis().
-  const SUPABASE_TABLES = ['users','attendance','transactions','closings','manualBonuses','staff_leave_requests','audit_logs','adminDeviceTokens'];
+  const SUPABASE_TABLES = ['users','attendance','transactions','closings','manualBonuses','staff_leave_requests','dailyTargets','targetBonusRewards','targetNotifications','targetSettings','audit_logs','adminDeviceTokens'];
   const SUPABASE_FALLBACK_POLL_MS = 2 * 60 * 1000;
   const SUPABASE_REALTIME_DEBOUNCE_MS = 450;
   const SERVER_TIMESTAMP_SENTINEL = { __supabaseServerTimestamp: true };
@@ -778,6 +778,18 @@
       await new Promise((resolve) => setTimeout(resolve, 0));
     }
     return cleanEntries.length;
+  }
+
+  async function bulkUpsertIfPresent(collectionName, entries, chunkSize = 200, label = '') {
+    try {
+      return await bulkUpsertCompat(collectionName, entries, chunkSize, label);
+    } catch (e) {
+      if (isMissingSupabaseTableError(e)) {
+        console.warn(`Tabel ${collectionName} belum ada, restore ${label || collectionName} dilewati`);
+        return 0;
+      }
+      throw e;
+    }
   }
 
   async function fastDeleteCollectionCompat(collectionName, options = {}) {
@@ -6320,6 +6332,36 @@ Masukkan PIN admin:`);
     return serializeBackupValue(record) || {};
   }
 
+  function backupSheetRows(rows = []) {
+    return (rows || []).map(row => {
+      const clean = serializeBackupRecord(row);
+      const out = {};
+      Object.entries(clean || {}).forEach(([key, value]) => {
+        out[key] = value && typeof value === 'object' ? JSON.stringify(value) : value;
+      });
+      return out;
+    });
+  }
+
+  function parseBackupCellValue(value) {
+    if (typeof value !== 'string') return value;
+    const clean = value.trim();
+    if (!clean) return value;
+    if (!/^[\[{]/.test(clean)) return value;
+    try { return JSON.parse(clean); } catch (_) { return value; }
+  }
+
+  function parseBackupSheetRows(rows = []) {
+    return (rows || []).map(row => {
+      const out = {};
+      Object.entries(row || {}).forEach(([key, value]) => {
+        if (value === undefined || value === '') return;
+        out[key] = parseBackupCellValue(value);
+      });
+      return out;
+    }).filter(row => Object.keys(row).length);
+  }
+
   function cleanFirestorePayload(obj = {}) {
     const out = {};
     Object.entries(obj || {}).forEach(([k, v]) => {
@@ -6413,13 +6455,19 @@ Masukkan PIN admin:`);
     const transactions = (rows.transactions || []).map(normalizeBackupTransactionRecord).filter(t => t.user);
     const closings = rows.closings || [];
     const manualBonuses = rows.manualBonuses || [];
+    const unlockRequests = rows.unlockRequests || [];
+    const dailyTargets = rows.dailyTargets || [];
+    const targetBonusRewards = rows.targetBonusRewards || [];
+    const targetNotifications = rows.targetNotifications || [];
+    const targetSettings = rows.targetSettings || [];
+    const adminDeviceTokens = rows.adminDeviceTokens || [];
     const bonusSettings = findBackupClosingDoc(closings, '__bonus_settings', 'bonus_settings') || cachedBonusSettings || {};
     const headerGuideNote = findBackupClosingDoc(closings, HEADER_GUIDE_NOTE_DOC_ID, 'header_guide_note') || cachedHeaderGuideNote || { id: HEADER_GUIDE_NOTE_DOC_ID, note: DEFAULT_HEADER_GUIDE_NOTE };
     const staffDailyHomeNote = findBackupClosingDoc(closings, STAFF_DAILY_NOTE_DOC_ID, 'staff_daily_home_note') || cachedStaffDailyHomeNote || { id: STAFF_DAILY_NOTE_DOC_ID, note: DEFAULT_STAFF_DAILY_NOTE, enabled: true };
     const receiptTextSettings = findBackupClosingDoc(closings, RECEIPT_TEXT_DOC_ID, 'receipt_text_settings') || getReceiptTextSettingsSafe();
     const rismaManualClosingConfig = findBackupClosingDoc(closings, RISMA_MANUAL_CLOSING_DOC_ID, 'closing_manual_config') || cachedRismaManualClosingConfig || { id: RISMA_MANUAL_CLOSING_DOC_ID, enabled: true, allowedUsers: [], allowedNames: {} };
     return {
-      version: 'supabase-admin-v10-full-server-backup',
+      version: 'supabase-admin-v11-full-server-backup',
       projectId: firebaseConfig.projectId,
       exportedAt: new Date().toISOString(),
       exportedBy: currentUser?.username || 'admin',
@@ -6429,6 +6477,12 @@ Masukkan PIN admin:`);
         transactions: sortByCreatedDesc(transactions),
         closings: sortByCreatedDesc((closings || []).filter(isClosingDataRecord)).map(c => serializeBackupRecord(c)),
         manualBonuses: sortByCreatedDesc(manualBonuses || []).map(b => serializeBackupRecord(b)),
+        unlockRequests: sortByCreatedDesc(unlockRequests || []).map(r => serializeBackupRecord(r)),
+        dailyTargets: sortByCreatedDesc(dailyTargets || []).map(r => serializeBackupRecord(r)),
+        targetBonusRewards: sortByCreatedDesc(targetBonusRewards || []).map(r => serializeBackupRecord(r)),
+        targetNotifications: sortByCreatedDesc(targetNotifications || []).map(r => serializeBackupRecord(r)),
+        targetSettings: sortByCreatedDesc(targetSettings || []).map(r => serializeBackupRecord(r)),
+        adminDeviceTokens: sortByCreatedDesc(adminDeviceTokens || []).map(r => serializeBackupRecord(r)),
         bonusSettings: serializeBackupRecord({ ...(bonusSettings || {}), transactionBonusRate: Number(bonusSettings.transactionBonusRate ?? getTransactionBonusRate()), transactionBonusPercent: Number(bonusSettings.transactionBonusPercent ?? getTransactionBonusPercent()), closingBonusPerMinute: Number(bonusSettings.closingBonusPerMinute ?? getClosingBonusPerMinute()), ...getClosingDeadlineSnapshot(bonusSettings || {}) }),
         headerGuideNote: serializeBackupRecord(headerGuideNote),
         staffDailyHomeNote: serializeBackupRecord(staffDailyHomeNote),
@@ -6446,6 +6500,12 @@ Masukkan PIN admin:`);
       transactions: cachedTransactions || [],
       closings: cachedClosings || [],
       manualBonuses: cachedManualBonuses || [],
+      unlockRequests: cachedUnlockRequests || [],
+      dailyTargets: cachedDailyTarget ? [{ id: cachedDailyTarget.id || serverTargetDocId(cachedDailyTarget.dateKey), ...cachedDailyTarget }] : [],
+      targetBonusRewards: [],
+      targetNotifications: cachedTargetNotification ? [{ ...cachedTargetNotification }] : [],
+      targetSettings: cachedTargetSettings && Object.keys(cachedTargetSettings).length ? [{ id: 'daily_target', ...cachedTargetSettings }] : [],
+      adminDeviceTokens: [],
       auditLogs: cachedAuditLogs || []
     });
   }
@@ -6467,16 +6527,34 @@ Masukkan PIN admin:`);
     return rows;
   }
 
+  async function fetchOptionalServerRowsForBackup(collectionName) {
+    try {
+      return await fetchAllServerRowsForBackup(collectionName);
+    } catch (e) {
+      if (isMissingSupabaseTableError(e)) {
+        console.warn(`Tabel ${collectionName} belum ada, backup dilewati`);
+        return [];
+      }
+      throw e;
+    }
+  }
+
   async function getBackupPayloadFresh() {
-    const [users, attendance, transactions, closings, manualBonuses, auditLogs] = await Promise.all([
+    const [users, attendance, transactions, closings, manualBonuses, unlockRequests, dailyTargets, targetBonusRewards, targetNotifications, targetSettings, adminDeviceTokens, auditLogs] = await Promise.all([
       fetchAllServerRowsForBackup('users'),
       fetchAllServerRowsForBackup('attendance'),
       fetchAllServerRowsForBackup('transactions'),
       fetchAllServerRowsForBackup('closings'),
       fetchAllServerRowsForBackup('manualBonuses'),
-      fetchAllServerRowsForBackup('audit_logs')
+      fetchOptionalServerRowsForBackup(STAFF_UNLOCK_TABLE),
+      fetchOptionalServerRowsForBackup(SERVER_DAILY_TARGETS_TABLE),
+      fetchOptionalServerRowsForBackup(SERVER_TARGET_REWARDS_TABLE),
+      fetchOptionalServerRowsForBackup(SERVER_TARGET_NOTIFICATIONS_TABLE),
+      fetchOptionalServerRowsForBackup(SERVER_TARGET_SETTINGS_TABLE),
+      fetchOptionalServerRowsForBackup('adminDeviceTokens'),
+      fetchOptionalServerRowsForBackup('audit_logs')
     ]);
-    return createBackupPayloadFromRows({ users, attendance, transactions, closings, manualBonuses, auditLogs });
+    return createBackupPayloadFromRows({ users, attendance, transactions, closings, manualBonuses, unlockRequests, dailyTargets, targetBonusRewards, targetNotifications, targetSettings, adminDeviceTokens, auditLogs });
   }
 
 
@@ -6509,9 +6587,9 @@ Masukkan PIN admin:`);
 
   function isRestoreBackupShapeSafe(backup) {
     const data = backup?.data || {};
-    const counts = ['users','attendance','transactions','closings','manualBonuses','auditLogs']
+    const counts = ['users','attendance','transactions','closings','manualBonuses','unlockRequests','dailyTargets','targetBonusRewards','targetNotifications','targetSettings','adminDeviceTokens','auditLogs']
       .reduce((sum, key) => sum + (Array.isArray(data[key]) ? data[key].length : 0), 0);
-    const hasSettings = !!(data.bonusSettings || data.headerGuideNote || data.staffDailyHomeNote || data.receiptTextSettings || data.rismaManualClosingConfig);
+    const hasSettings = !!(data.bonusSettings || data.headerGuideNote || data.staffDailyHomeNote || data.receiptTextSettings || data.rismaManualClosingConfig || data.targetSettings);
     return counts > 0 || hasSettings;
   }
 
@@ -6526,6 +6604,12 @@ Masukkan PIN admin:`);
       `Transaksi: ${count('transactions')}`,
       `Closing: ${count('closings')}`,
       `Bonus manual: ${count('manualBonuses')}`,
+      `Buka fitur: ${count('unlockRequests')}`,
+      `Target harian: ${count('dailyTargets')}`,
+      `Reward target: ${count('targetBonusRewards')}`,
+      `Notifikasi target: ${count('targetNotifications')}`,
+      `Setting target: ${count('targetSettings')}`,
+      `Token notifikasi: ${count('adminDeviceTokens')}`,
       '',
       'Data yang sudah ada dan tidak ada di backup TIDAK akan dihapus otomatis.',
       'Aplikasi juga membuat backup darurat sebelum restore.'
@@ -6656,6 +6740,12 @@ Masukkan PIN admin:`);
         transactions: Array.isArray(raw.transactions) ? raw.transactions : [],
         closings: Array.isArray(raw.closings) ? raw.closings : [],
         manualBonuses: Array.isArray(raw.manualBonuses) ? raw.manualBonuses : [],
+        unlockRequests: Array.isArray(raw.unlockRequests) ? raw.unlockRequests : [],
+        dailyTargets: Array.isArray(raw.dailyTargets) ? raw.dailyTargets : [],
+        targetBonusRewards: Array.isArray(raw.targetBonusRewards) ? raw.targetBonusRewards : [],
+        targetNotifications: Array.isArray(raw.targetNotifications) ? raw.targetNotifications : [],
+        targetSettings: Array.isArray(raw.targetSettings) ? raw.targetSettings : (raw.targetSettings ? [raw.targetSettings] : []),
+        adminDeviceTokens: Array.isArray(raw.adminDeviceTokens) ? raw.adminDeviceTokens : [],
         bonusSettings: raw.bonusSettings || null,
         headerGuideNote: raw.headerGuideNote || raw.headerNote || null,
         staffDailyHomeNote: raw.staffDailyHomeNote || raw.staffDailyNote || null,
@@ -6934,6 +7024,12 @@ Masukkan PIN admin:`);
               deletedBy: String(b.deletedBy || ''),
               deletedByName: String(b.deletedByName || '')
             })).filter(b => b.user),
+            unlockRequests: parseBackupSheetRows(pickSheetRows(['unlockRequests','staff_leave_requests','buka_fitur','Buka Fitur'])),
+            dailyTargets: parseBackupSheetRows(pickSheetRows(['dailyTargets','daily_targets','target_harian','Target Harian'])),
+            targetBonusRewards: parseBackupSheetRows(pickSheetRows(['targetBonusRewards','target_bonus_rewards','reward_target','Reward Target'])),
+            targetNotifications: parseBackupSheetRows(pickSheetRows(['targetNotifications','target_notifications','notif_target','Notifikasi Target'])),
+            targetSettings: parseBackupSheetRows(pickSheetRows(['targetSettings','target_settings','setting_target','Setting Target'])),
+            adminDeviceTokens: parseBackupSheetRows(pickSheetRows(['adminDeviceTokens','admin_device_tokens','token_notifikasi','Token Notifikasi'])),
             bonusSettings: (pickSheetRows(['bonusSettings','bonus_settings','setting_bonus'])[0] || null),
             headerGuideNote: (() => {
               const row = pickSheetRows(['headerGuideNote','header_guide_note','catatan_header','panduan_header'])[0] || null;
@@ -6984,8 +7080,8 @@ Masukkan PIN admin:`);
       if ($('restore-pro-file')) $('restore-pro-file').value = '';
       if ($('restore-file')) $('restore-file').value = '';
       if ($('restore-excel-file')) $('restore-excel-file').value = '';
-      await logAudit('restore_data', { format: kind, users: result.users.length, attendance: result.attendance.length, transactions: result.transactions.length, closings: result.closings.length, manualBonuses: result.manualBonuses.length });
-      showToast(`✓ Restore ${kind.toUpperCase()} aman selesai: ${result.users.length} user, ${result.attendance.length} absen, ${result.transactions.length} transaksi, ${result.closings.length} closing · tidak ada data lama yang dihapus`);
+      await logAudit('restore_data', { format: kind, users: result.users.length, attendance: result.attendance.length, transactions: result.transactions.length, closings: result.closings.length, manualBonuses: result.manualBonuses.length, unlockRequests: result.unlockRequests.length, dailyTargets: result.dailyTargets.length, targetBonusRewards: result.targetBonusRewards.length, targetNotifications: result.targetNotifications.length, targetSettings: result.targetSettings.length, adminDeviceTokens: result.adminDeviceTokens.length });
+      showToast(`✓ Restore ${kind.toUpperCase()} aman selesai: ${result.users.length} user, ${result.attendance.length} absen, ${result.transactions.length} transaksi, ${result.dailyTargets.length} target · tidak ada data lama yang dihapus`);
       await renderSettingsSummary();
       await refreshCurrentPage();
     } catch (e) {
@@ -7035,6 +7131,23 @@ Masukkan PIN admin:`);
     return deleted;
   }
 
+  function isMissingSupabaseTableError(e) {
+    const text = String(e?.code || e?.message || e || '').toLowerCase();
+    return text.includes('42p01') || text.includes('pgrst205') || text.includes('does not exist') || text.includes('not found') || text.includes('schema cache');
+  }
+
+  async function deleteCollectionIfPresent(collectionName, options = {}) {
+    try {
+      return await deleteCollectionCompletely(collectionName, options);
+    } catch (e) {
+      if (isMissingSupabaseTableError(e)) {
+        console.warn(`Tabel ${collectionName} belum ada, reset dilewati`);
+        return 0;
+      }
+      throw e;
+    }
+  }
+
   function resetRuntimeStateAfterDataWipe() {
     selectedUserFilter = 'all';
     selectedRestoreProFile = null;
@@ -7053,6 +7166,9 @@ Masukkan PIN admin:`);
     cachedClosings = [];
     cachedManualBonuses = [];
     cachedUnlockRequests = [];
+    cachedDailyTarget = null;
+    cachedTargetNotification = null;
+    cachedTargetSettings = {};
     cachedRismaManualClosingConfig = { id: RISMA_MANUAL_CLOSING_DOC_ID, enabled: true, allowedUsers: [], allowedNames: {} };
     cachedHeaderGuideNote = { id: HEADER_GUIDE_NOTE_DOC_ID, note: DEFAULT_HEADER_GUIDE_NOTE, updatedAtMs: 0, updatedBy: '', updatedByName: '' };
       cachedStaffDailyHomeNote = { id: STAFF_DAILY_NOTE_DOC_ID, note: DEFAULT_STAFF_DAILY_NOTE, enabled: true, updatedAtMs: 0, updatedBy: '', updatedByName: '' };
@@ -7081,7 +7197,7 @@ Masukkan PIN admin:`);
     if (!isAdmin()) return showToast('Hanya admin!', true);
     if (isBusy) return showToast('Tunggu proses selesai', true);
     const pin = await askPin(`⚠️ Reset SEMUA data aplikasi?
-Data transaksi, absen, closing, bonus manual, audit log, recycle bin, setting bonus, catatan header, catatan home staff, setting struk, dan config closing Risma akan dihapus/reset.
+Data transaksi, absen, closing, bonus manual, buka fitur, target harian, notifikasi, audit log, recycle bin, setting bonus, setting target, catatan header, catatan home staff, setting struk, dan config closing Risma akan dihapus/reset.
 
 Semua akun user dan admin TIDAK ikut dihapus supaya aplikasi pusat tetap aman dan aplikasi lain tetap bisa login.
 
@@ -7105,11 +7221,17 @@ Ketik PIN admin untuk lanjut:`);
       stopRealtimeData();
 
       const deleted = {};
-      deleted.transactions = await deleteCollectionCompletely('transactions');
-      deleted.attendance = await deleteCollectionCompletely('attendance');
-      deleted.closings = await deleteCollectionCompletely('closings');
-      deleted.manualBonuses = await deleteCollectionCompletely('manualBonuses');
-      deleted.audit_logs = await deleteCollectionCompletely('audit_logs');
+      deleted.transactions = await deleteCollectionIfPresent('transactions');
+      deleted.attendance = await deleteCollectionIfPresent('attendance');
+      deleted.closings = await deleteCollectionIfPresent('closings');
+      deleted.manualBonuses = await deleteCollectionIfPresent('manualBonuses');
+      deleted.staff_leave_requests = await deleteCollectionIfPresent(STAFF_UNLOCK_TABLE);
+      deleted.dailyTargets = await deleteCollectionIfPresent(SERVER_DAILY_TARGETS_TABLE);
+      deleted.targetBonusRewards = await deleteCollectionIfPresent(SERVER_TARGET_REWARDS_TABLE);
+      deleted.targetNotifications = await deleteCollectionIfPresent(SERVER_TARGET_NOTIFICATIONS_TABLE);
+      deleted.targetSettings = await deleteCollectionIfPresent(SERVER_TARGET_SETTINGS_TABLE);
+      deleted.adminDeviceTokens = await deleteCollectionIfPresent('adminDeviceTokens');
+      deleted.audit_logs = await deleteCollectionIfPresent('audit_logs');
       deleted.users = 0;
 
       resetRuntimeStateAfterDataWipe();
@@ -7216,6 +7338,12 @@ Ketik PIN admin untuk lanjut:`);
           deletedBy: b.deletedBy || '',
           deletedByName: b.deletedByName || ''
         }));
+        const unlockRequestRows = backupSheetRows(backup.data.unlockRequests || []);
+        const dailyTargetRows = backupSheetRows(backup.data.dailyTargets || []);
+        const targetBonusRewardRows = backupSheetRows(backup.data.targetBonusRewards || []);
+        const targetNotificationRows = backupSheetRows(backup.data.targetNotifications || []);
+        const targetSettingRows = backupSheetRows(backup.data.targetSettings || []);
+        const adminDeviceTokenRows = backupSheetRows(backup.data.adminDeviceTokens || []);
         const bonusSettingsRows = [{
           transactionBonusRate: backup.data.bonusSettings?.transactionBonusRate ?? '',
           transactionBonusPercent: Number(backup.data.bonusSettings?.transactionBonusRate || 0) * 100,
@@ -7270,7 +7398,7 @@ Ketik PIN admin untuk lanjut:`);
           updatedBy: backup.data.rismaManualClosingConfig?.updatedBy || '',
           updatedByName: backup.data.rismaManualClosingConfig?.updatedByName || ''
         }];
-        const metaRows = [{ version: backup.version || '', projectId: backup.projectId || firebaseConfig.projectId, exportedAt: backup.exportedAt || '', exportedBy: backup.exportedBy || '', note: 'Backup lengkap: users, attendance, transactions, closings, manualBonuses, bonusSettings, headerGuideNote, staffDailyHomeNote, receiptTextSettings, rismaManualClosingConfig, auditLogs' }];
+        const metaRows = [{ version: backup.version || '', projectId: backup.projectId || firebaseConfig.projectId, exportedAt: backup.exportedAt || '', exportedBy: backup.exportedBy || '', note: 'Backup lengkap: users, attendance, transactions, closings, manualBonuses, unlockRequests, dailyTargets, targetBonusRewards, targetNotifications, targetSettings, adminDeviceTokens, bonusSettings, headerGuideNote, staffDailyHomeNote, receiptTextSettings, rismaManualClosingConfig, auditLogs' }];
         const auditRows = (backup.data.auditLogs || []).map(a => ({ id: a.id || '', action: a.action || a.type || '', user: a.user || a.username || '', name: a.name || '', createdAtMs: a.createdAtMs || '', detail: JSON.stringify(a.detail || a.payload || {}) }));
         XLSX.utils.book_append_sheet(wb, XLSX.utils.json_to_sheet(metaRows), 'meta');
         XLSX.utils.book_append_sheet(wb, XLSX.utils.json_to_sheet(usersRows), 'users');
@@ -7278,6 +7406,12 @@ Ketik PIN admin untuk lanjut:`);
         XLSX.utils.book_append_sheet(wb, XLSX.utils.json_to_sheet(transactionRows), 'transactions');
         XLSX.utils.book_append_sheet(wb, XLSX.utils.json_to_sheet(closingRows), 'closings');
         XLSX.utils.book_append_sheet(wb, XLSX.utils.json_to_sheet(manualBonusRows), 'manualBonuses');
+        XLSX.utils.book_append_sheet(wb, XLSX.utils.json_to_sheet(unlockRequestRows), 'unlockRequests');
+        XLSX.utils.book_append_sheet(wb, XLSX.utils.json_to_sheet(dailyTargetRows), 'dailyTargets');
+        XLSX.utils.book_append_sheet(wb, XLSX.utils.json_to_sheet(targetBonusRewardRows), 'targetBonusRewards');
+        XLSX.utils.book_append_sheet(wb, XLSX.utils.json_to_sheet(targetNotificationRows), 'targetNotifications');
+        XLSX.utils.book_append_sheet(wb, XLSX.utils.json_to_sheet(targetSettingRows), 'targetSettings');
+        XLSX.utils.book_append_sheet(wb, XLSX.utils.json_to_sheet(adminDeviceTokenRows), 'adminDeviceTokens');
         XLSX.utils.book_append_sheet(wb, XLSX.utils.json_to_sheet(bonusSettingsRows), 'bonusSettings');
         XLSX.utils.book_append_sheet(wb, XLSX.utils.json_to_sheet(headerGuideRows), 'headerGuideNote');
         XLSX.utils.book_append_sheet(wb, XLSX.utils.json_to_sheet(staffDailyRows), 'staffDailyHomeNote');
@@ -7306,6 +7440,12 @@ Ketik PIN admin untuk lanjut:`);
     const transactions = Array.isArray(data.transactions) ? data.transactions : [];
     const closings = Array.isArray(data.closings) ? data.closings : [];
     const manualBonuses = Array.isArray(data.manualBonuses) ? data.manualBonuses : [];
+    const unlockRequests = Array.isArray(data.unlockRequests) ? data.unlockRequests : [];
+    const dailyTargets = Array.isArray(data.dailyTargets) ? data.dailyTargets : [];
+    const targetBonusRewards = Array.isArray(data.targetBonusRewards) ? data.targetBonusRewards : [];
+    const targetNotifications = Array.isArray(data.targetNotifications) ? data.targetNotifications : [];
+    const targetSettings = Array.isArray(data.targetSettings) ? data.targetSettings : (data.targetSettings && typeof data.targetSettings === 'object' ? [data.targetSettings] : []);
+    const adminDeviceTokens = Array.isArray(data.adminDeviceTokens) ? data.adminDeviceTokens : [];
     const auditLogs = Array.isArray(data.auditLogs) ? data.auditLogs : [];
     const headerGuideNote = data.headerGuideNote && typeof data.headerGuideNote === 'object' ? data.headerGuideNote : null;
     const staffDailyHomeNote = data.staffDailyHomeNote && typeof data.staffDailyHomeNote === 'object' ? data.staffDailyHomeNote : null;
@@ -7336,7 +7476,31 @@ Ketik PIN admin untuk lanjut:`);
     const transactionRows = [];
     const closingRows = [];
     const manualBonusRows = [];
+    const unlockRequestRows = [];
+    const dailyTargetRows = [];
+    const targetBonusRewardRows = [];
+    const targetNotificationRows = [];
+    const targetSettingRows = [];
+    const adminDeviceTokenRows = [];
     const auditRows = [];
+
+    const pushGenericRestoreRows = (sourceRows, targetRows, fallbackId) => {
+      (sourceRows || []).forEach((raw, index) => {
+        const row = serializeBackupRecord(raw || {});
+        const fallback = typeof fallbackId === 'function' ? fallbackId(row, index) : `${fallbackId || 'restore'}_${index + 1}_${nowMs}`;
+        const id = safeRestoreDocId(row.id || row.docId || row.clientId || fallback);
+        if (!id) return;
+        targetRows.push({ id, data: cleanFirestorePayload({
+          ...row,
+          id,
+          restoredAt: serverTimestamp(),
+          restoredAtMs: nowMs,
+          restoredBy,
+          restoredByName,
+          restoredFromBackup: true
+        }) });
+      });
+    };
 
     // Settings tetap disimpan ke tabel closings karena logika lama membaca setting dari collection/dokumen ini.
     if (data.bonusSettings && typeof data.bonusSettings === 'object') {
@@ -7604,6 +7768,26 @@ Ketik PIN admin untuk lanjut:`);
       })});
     }
 
+    pushGenericRestoreRows(unlockRequests, unlockRequestRows, (row, index) => {
+      const user = sanitizeUsername(row.user || row.username || row.targetUsername || 'user');
+      return row.id || `unlock_${user}_${Number(row.createdAtMs || row.requestedAtMs || nowMs)}_${index + 1}`;
+    });
+    pushGenericRestoreRows(dailyTargets, dailyTargetRows, (row, index) => {
+      const dk = String(row.dateKey || row.date || '').slice(0, 10);
+      return row.id || (dk ? serverTargetDocId(dk) : `daily_target_restore_${nowMs}_${index + 1}`);
+    });
+    pushGenericRestoreRows(targetBonusRewards, targetBonusRewardRows, (row, index) => {
+      const dk = String(row.dateKey || row.date || '').slice(0, 10);
+      const user = sanitizeUsername(row.user || row.targetUsername || row.username || '');
+      return row.id || (dk && user ? serverTargetRewardId(dk, user) : `targetreward_restore_${nowMs}_${index + 1}`);
+    });
+    pushGenericRestoreRows(targetNotifications, targetNotificationRows, (row, index) => {
+      const dk = String(row.dateKey || row.date || '').slice(0, 10);
+      return row.id || (dk ? serverTargetNotifId(dk) : `targetnotif_restore_${nowMs}_${index + 1}`);
+    });
+    pushGenericRestoreRows(targetSettings, targetSettingRows, (row, index) => row.id || (index === 0 ? 'daily_target' : `target_setting_${index + 1}`));
+    pushGenericRestoreRows(adminDeviceTokens, adminDeviceTokenRows, (row, index) => row.id || row.token || row.deviceId || `admin_token_restore_${nowMs}_${index + 1}`);
+
     for (const a of auditLogs.slice(0, AUDIT_SYNC_LIMIT)) {
       const id = String(a.id || `restore_log_${nowMs}_${Math.random().toString(36).slice(2)}`).replace(/[^a-zA-Z0-9_\-.]/g, '_').slice(0, 160);
       auditRows.push({ id, data: cleanFirestorePayload({ ...a, id, restoredAt: serverTimestamp(), restoredBy }) });
@@ -7614,7 +7798,13 @@ Ketik PIN admin untuk lanjut:`);
     await bulkUpsertCompat('transactions', transactionRows, 500, 'transaksi');
     await bulkUpsertCompat('closings', closingRows, 500, 'closing/settings');
     await bulkUpsertCompat('manualBonuses', manualBonusRows, 500, 'bonus manual');
-    await bulkUpsertCompat('audit_logs', auditRows, 500, 'audit');
+    await bulkUpsertIfPresent(STAFF_UNLOCK_TABLE, unlockRequestRows, 500, 'buka fitur');
+    await bulkUpsertIfPresent(SERVER_DAILY_TARGETS_TABLE, dailyTargetRows, 500, 'target harian');
+    await bulkUpsertIfPresent(SERVER_TARGET_REWARDS_TABLE, targetBonusRewardRows, 500, 'reward target');
+    await bulkUpsertIfPresent(SERVER_TARGET_NOTIFICATIONS_TABLE, targetNotificationRows, 500, 'notifikasi target');
+    await bulkUpsertIfPresent(SERVER_TARGET_SETTINGS_TABLE, targetSettingRows, 500, 'setting target');
+    await bulkUpsertIfPresent('adminDeviceTokens', adminDeviceTokenRows, 500, 'token notifikasi');
+    await bulkUpsertIfPresent('audit_logs', auditRows, 500, 'audit');
 
     // MODE AMAN: jangan hapus / soft-delete data aktif yang tidak ada di file backup.
     cleanupResult.attendanceRemoved = 0;
@@ -7623,7 +7813,7 @@ Ketik PIN admin untuk lanjut:`);
     cleanupResult.manualBonusesRemoved = 0;
     cleanupResult.usersDeactivated = 0;
 
-    return { users, attendance, transactions, closings, manualBonuses, auditLogs, headerGuideNote, staffDailyHomeNote, receiptTextSettings, cleanupResult };
+    return { users, attendance, transactions, closings, manualBonuses, unlockRequests, dailyTargets, targetBonusRewards, targetNotifications, targetSettings, adminDeviceTokens, auditLogs, headerGuideNote, staffDailyHomeNote, receiptTextSettings, cleanupResult };
   }
 
   async function restoreBackupFromFile() {
@@ -7650,8 +7840,8 @@ Ketik PIN admin untuk lanjut:`);
       unmuteAdminNotificationsForRestore();
       bindRealtimeData();
       if ($('restore-file')) $('restore-file').value = '';
-      await logAudit('restore_data', { format: 'json', users: result.users.length, attendance: result.attendance.length, transactions: result.transactions.length, closings: result.closings.length, manualBonuses: result.manualBonuses.length });
-      showToast(`✓ Restore aman selesai: ${result.users.length} user, ${result.attendance.length} absen, ${result.transactions.length} transaksi, ${result.closings.length} closing · tidak ada data lama yang dihapus`);
+      await logAudit('restore_data', { format: 'json', users: result.users.length, attendance: result.attendance.length, transactions: result.transactions.length, closings: result.closings.length, manualBonuses: result.manualBonuses.length, unlockRequests: result.unlockRequests.length, dailyTargets: result.dailyTargets.length, targetBonusRewards: result.targetBonusRewards.length, targetNotifications: result.targetNotifications.length, targetSettings: result.targetSettings.length, adminDeviceTokens: result.adminDeviceTokens.length });
+      showToast(`✓ Restore aman selesai: ${result.users.length} user, ${result.attendance.length} absen, ${result.transactions.length} transaksi, ${result.dailyTargets.length} target · tidak ada data lama yang dihapus`);
       await renderSettingsSummary();
       await refreshCurrentPage();
     } catch (e) {
@@ -7785,6 +7975,12 @@ Ketik PIN admin untuk lanjut:`);
             deletedBy: String(b.deletedBy || ''),
             deletedByName: String(b.deletedByName || '')
           })).filter(b => b.user),
+          unlockRequests: parseBackupSheetRows(pickSheetRows(['unlockRequests','staff_leave_requests','buka_fitur','Buka Fitur'])),
+          dailyTargets: parseBackupSheetRows(pickSheetRows(['dailyTargets','daily_targets','target_harian','Target Harian'])),
+          targetBonusRewards: parseBackupSheetRows(pickSheetRows(['targetBonusRewards','target_bonus_rewards','reward_target','Reward Target'])),
+          targetNotifications: parseBackupSheetRows(pickSheetRows(['targetNotifications','target_notifications','notif_target','Notifikasi Target'])),
+          targetSettings: parseBackupSheetRows(pickSheetRows(['targetSettings','target_settings','setting_target','Setting Target'])),
+          adminDeviceTokens: parseBackupSheetRows(pickSheetRows(['adminDeviceTokens','admin_device_tokens','token_notifikasi','Token Notifikasi'])),
           bonusSettings: (pickSheetRows(['bonusSettings','bonus_settings','setting_bonus'])[0] || null),
           headerGuideNote: (() => {
             const row = pickSheetRows(['headerGuideNote','header_guide_note','catatan_header','panduan_header'])[0] || null;
@@ -7832,8 +8028,8 @@ Ketik PIN admin untuk lanjut:`);
       unmuteAdminNotificationsForRestore();
       bindRealtimeData();
       if ($('restore-excel-file')) $('restore-excel-file').value = '';
-      await logAudit('restore_data', { format: 'excel', users: result.users.length, attendance: result.attendance.length, transactions: result.transactions.length, closings: result.closings.length, manualBonuses: result.manualBonuses.length });
-      showToast(`✓ Restore Excel aman selesai: ${result.users.length} user, ${result.attendance.length} absen, ${result.transactions.length} transaksi, ${result.closings.length} closing · tidak ada data lama yang dihapus`);
+      await logAudit('restore_data', { format: 'excel', users: result.users.length, attendance: result.attendance.length, transactions: result.transactions.length, closings: result.closings.length, manualBonuses: result.manualBonuses.length, unlockRequests: result.unlockRequests.length, dailyTargets: result.dailyTargets.length, targetBonusRewards: result.targetBonusRewards.length, targetNotifications: result.targetNotifications.length, targetSettings: result.targetSettings.length, adminDeviceTokens: result.adminDeviceTokens.length });
+      showToast(`✓ Restore Excel aman selesai: ${result.users.length} user, ${result.attendance.length} absen, ${result.transactions.length} transaksi, ${result.dailyTargets.length} target · tidak ada data lama yang dihapus`);
       await renderSettingsSummary();
       await refreshCurrentPage();
     } catch (e) {
