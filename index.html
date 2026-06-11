@@ -979,6 +979,7 @@
   const ROCKY_NOTIFY_SECRET = 'rockyNotifRahasia2026';
   const ROCKY_SERVER_REGISTER_TOKEN_URL = ROCKY_NOTIFY_WORKER_BASE_URL + '/register-server-token';
   const ROCKY_STAFF_NOTIFY_MANUAL_BONUS_URL = ROCKY_NOTIFY_WORKER_BASE_URL + '/notify-staff-manual-bonus';
+  const ROCKY_NOTIFY_TARGET_URL = ROCKY_NOTIFY_WORKER_BASE_URL + '/notify-target-achieved';
   // Web push Firebase tidak dipakai di mode Supabase. Untuk APK Android, token FCM native tetap bisa disimpan ke tabel adminDeviceTokens.
   const FCM_WEB_VAPID_KEY = '';
   const ADMIN_NOTIF_SEEN_KEY = 'rocky_admin_seen_transaction_notifications_v1';
@@ -992,6 +993,7 @@
   let appPageHistoryStack = [], appBackNavigating = false;
   let selectedRestoreProFile = null;
   let cachedTransactions = [], cachedAttendance = [], cachedUsers = [], cachedAuditLogs = [], cachedClosings = [], cachedManualBonuses = [];
+  let cachedDailyTarget = null, cachedTargetNotification = null, cachedTargetSettings = {}, serverTargetApplyTimer = 0, serverTargetApplying = false;
   let adminNotifBootstrapped = false;
   let adminNotifSeenIds = new Set();
   let cachedBonusSettings = { transactionBonusRate: 0.015, transactionBonusPercent: 1.5, closingBonusPerMinute: 100, closingDeadlineTime: '18:00', closingDeadlineHour: 18, closingDeadlineMinute: 0, closingDeadlineMinutes: 1080 };
@@ -1602,6 +1604,23 @@
   function activeUsers(list = cachedUsers) {
     return sortUsers((list || []).filter(isUserActive));
   }
+  function isDummyUser(rec) {
+    const value = String(rec?.accountType || rec?.mode || '').toLowerCase();
+    return !!rec && (rec.isDummy === true || rec.trialMode === true || rec.dummy === true || value === 'dummy' || value === 'trial');
+  }
+  function getTrialFlags(user) {
+    const dummy = isDummyUser(user);
+    return dummy ? { isDummy: true, trialMode: true, accountType: 'dummy', excludeFromReports: true } : { isDummy: false, trialMode: false, accountType: 'normal', excludeFromReports: false };
+  }
+  function isTrialRecord(rec) {
+    if (!rec) return false;
+    if (rec.isDummy === true || rec.trialMode === true || rec.excludeFromReports === true || String(rec.accountType || '').toLowerCase() === 'dummy') return true;
+    const username = sanitizeUsername(rec.user || rec.username || rec.targetUsername || '');
+    return !!username && isDummyUser(getUserByUsername(username));
+  }
+  function realActiveUsers(list = cachedUsers) {
+    return activeUsers(list).filter(u => !isDummyUser(u));
+  }
 
   function normalizeRole(role = 'staff') {
     const value = sanitizeUsername(role || 'staff');
@@ -1627,7 +1646,7 @@
     return !!user && isUserActive(user) && normalizeRole(user.role || 'staff') === 'staff' && !ADMIN_USERNAMES.includes(sanitizeUsername(user.username));
   }
   function getStaffBonusUsers() {
-    return activeUsers().filter(isStaffBonusUser);
+    return realActiveUsers().filter(isStaffBonusUser);
   }
   function isManualBonusUser(userOrUsername) {
     const user = typeof userOrUsername === 'object' ? userOrUsername : getUserByUsername(userOrUsername);
@@ -1671,10 +1690,10 @@
     }
   }
   function getVisibleTransactions() {
-    return cachedTransactions.filter(t => !isRecordDeleted(t));
+    return cachedTransactions.filter(t => !isRecordDeleted(t) && !isTrialRecord(t));
   }
   function getVisibleAttendance() {
-    return cachedAttendance.filter(a => !isRecordDeleted(a));
+    return cachedAttendance.filter(a => !isRecordDeleted(a) && !isTrialRecord(a));
   }
   function getDeletedTransactions() {
     return sortByCreatedDesc(cachedTransactions.filter(isRecordDeleted));
@@ -1803,7 +1822,7 @@
     for (const a of getVisibleAttendance()) {
       if (extractDateKey(a) === today) todayUsers.add(sanitizeUsername(a.user));
     }
-    return { activeToday: todayUsers.size, userCount: activeUsers().length };
+    return { activeToday: todayUsers.size, userCount: realActiveUsers().length };
   }
   function renderAdminClosingPanelMaybe(force = false) {
     if (!isAdmin()) return;
@@ -1825,10 +1844,12 @@
     const board = $('admin-dashboard-panels');
     if (!board) return;
     const stats = getAdminDashboardData();
-    const hash = `${stats.activeToday}|${stats.userCount}`;
+    const target = serverDailyTargetSummary();
+    const hash = `${stats.activeToday}|${stats.userCount}|${target.totalAmount}|${target.progressPercent}|${target.reached}|${cachedTargetNotification?.read === false ? 'new' : 'seen'}`;
     if (hash === adminDashboardPanelsHash && board.innerHTML.trim()) return;
     adminDashboardPanelsHash = hash;
     board.innerHTML = `
+      ${renderServerDailyTargetCard(target)}
       <div style="display:grid;grid-template-columns:1fr 1fr;gap:8px;margin-bottom:8px" class="page-in s3">
         <div class="card" style="padding:10px 11px"><p class="label-xs" style="margin-bottom:5px;font-size:9px">User Aktif Hari Ini</p><p style="font-family:var(--num-font);font-size:18px;font-weight:850;color:var(--green);line-height:1">${stats.activeToday}</p></div>
         <div class="card" style="padding:10px 11px"><p class="label-xs" style="margin-bottom:5px;font-size:9px">User Sistem</p><p style="font-family:var(--num-font);font-size:18px;font-weight:850;color:var(--accent);line-height:1">${stats.userCount}</p></div>
@@ -1836,6 +1857,286 @@
       <button onclick="router.navigate('report')" class="btn btn-glass page-in s4" style="width:100%;padding:10px 12px;font-size:12px;margin-bottom:8px"><i class="fas fa-ranking-star"></i> Lihat Ranking Omzet di Global</button>
 `;
   }
+
+  const SERVER_DAILY_TARGET_AMOUNT = 2500000;
+  const SERVER_BONUS_TARGET_AMOUNT = 10000;
+  const SERVER_TARGET_SETTINGS_TABLE = 'targetSettings';
+  const SERVER_DAILY_TARGETS_TABLE = 'dailyTargets';
+  const SERVER_TARGET_REWARDS_TABLE = 'targetBonusRewards';
+  const SERVER_TARGET_NOTIFICATIONS_TABLE = 'targetNotifications';
+  function serverTargetDocId(dateKey = toDateKey(nowDate())) { return `daily_target_${String(dateKey || toDateKey(nowDate())).slice(0, 10)}`; }
+  function serverTargetBonusId(dateKey, username) { return `targetbonus_${String(dateKey || toDateKey(nowDate())).slice(0, 10)}_${sanitizeUsername(username)}`; }
+  function serverTargetRewardId(dateKey, username) { return `targetreward_${String(dateKey || toDateKey(nowDate())).slice(0, 10)}_${sanitizeUsername(username)}`; }
+  function serverTargetNotifId(dateKey = toDateKey(nowDate())) { return `targetnotif_${String(dateKey || toDateKey(nowDate())).slice(0, 10)}`; }
+  function serverTargetNumber(data, keys, fallback) {
+    for (const key of keys) {
+      const n = Number(data?.[key]);
+      if (Number.isFinite(n) && n >= 0) return n;
+    }
+    return fallback;
+  }
+  function serverTargetSettings() {
+    const data = cachedTargetSettings || {};
+    return {
+      targetAmount: serverTargetNumber(data, ['targetAmount','dailyTargetAmount','dailyOmzetTarget','omzetTarget'], SERVER_DAILY_TARGET_AMOUNT),
+      bonusAmount: serverTargetNumber(data, ['bonusAmount','bonusTargetAmount','dailyTargetBonusAmount','targetBonusAmount','BONUS_TARGET_AMOUNT'], SERVER_BONUS_TARGET_AMOUNT)
+    };
+  }
+  function serverTargetTransactions(dateKey = toDateKey(nowDate())) {
+    const d = String(dateKey || toDateKey(nowDate())).slice(0, 10);
+    const activeSet = new Set(realActiveUsers().filter(u => normalizeRole(u.role || 'staff') !== 'admin').map(u => sanitizeUsername(u.username || u.id)).filter(Boolean));
+    return getVisibleTransactions().filter(t => getTransactionDateKey(t) === d && (!activeSet.size || activeSet.has(sanitizeUsername(t.user))));
+  }
+  function serverDailyTargetSummary(dateKey = toDateKey(nowDate())) {
+    const d = String(dateKey || toDateKey(nowDate())).slice(0, 10);
+    const settings = serverTargetSettings();
+    const targetAmount = Math.max(1, Number(settings.targetAmount || SERVER_DAILY_TARGET_AMOUNT));
+    const totalAmount = serverTargetTransactions(d).reduce((sum, t) => sum + Number(t.amount || 0), 0);
+    const progressPercent = Number(((totalAmount / targetAmount) * 100).toFixed(2));
+    return { dateKey: d, targetAmount, totalAmount, progressPercent, reached: totalAmount >= targetAmount, remainingAmount: Math.max(0, targetAmount - totalAmount), bonusAmount: Number(settings.bonusAmount || 0) };
+  }
+  function serverTargetRewardPlan(dateKey = toDateKey(nowDate())) {
+    const d = String(dateKey || toDateKey(nowDate())).slice(0, 10);
+    const attUsers = new Set(getVisibleAttendance().filter(a => extractDateKey(a) === d).map(a => sanitizeUsername(a.user)).filter(Boolean));
+    const users = realActiveUsers().filter(u => normalizeRole(u.role || 'staff') !== 'admin').map(u => ({ ...u, username: sanitizeUsername(u.username || u.id) })).filter(u => u.username);
+    const active = users.map(u => u.username);
+    const rewarded = users.filter(u => !isDailyRole(u.role || 'staff') && attUsers.has(u.username)).map(u => u.username);
+    const byUser = new Map(users.map(u => [u.username, u]));
+    return { activeUsers: active, rewardedUsers: rewarded, users: rewarded.map(u => byUser.get(u)).filter(Boolean) };
+  }
+  async function serverLoadTargetSettings() {
+    for (const id of ['daily_target','__daily_target','default']) {
+      try {
+        const snap = await getDocFromServer(doc(db, SERVER_TARGET_SETTINGS_TABLE, id));
+        if (snap.exists()) {
+          cachedTargetSettings = snap.data() || {};
+          return;
+        }
+      } catch (_) {
+        return;
+      }
+    }
+  }
+  async function serverInsertIfAbsent(table, id, payload) {
+    try {
+      const { error } = await supabase.from(table).insert({ id, data: deepCloneCompat(payload || {}) });
+      if (error) {
+        if (error.code === '23505' || /duplicate/i.test(error.message || '')) return false;
+        throw error;
+      }
+      return true;
+    } catch (e) {
+      console.warn(`${table} insert dilewati`, e?.code || e?.message || e);
+      return false;
+    }
+  }
+  async function serverNotifyTarget(summary, plan) {
+    try {
+      await fetch(ROCKY_NOTIFY_TARGET_URL, {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json', 'X-Notify-Secret': ROCKY_NOTIFY_SECRET },
+        body: JSON.stringify({ secret: ROCKY_NOTIFY_SECRET, dateKey: summary.dateKey, targetAmount: summary.targetAmount, totalAmount: summary.totalAmount, activeUsers: plan.activeUsers, rewardedUsers: plan.rewardedUsers })
+      });
+    } catch (e) {
+      console.warn('notify target server gagal', e?.message || e);
+    }
+  }
+  async function serverSaveTargetStatus(summary, plan, extra = {}) {
+    const current = cachedDailyTarget || {};
+    const payload = {
+      dateKey: summary.dateKey,
+      targetAmount: summary.targetAmount,
+      totalAmount: summary.totalAmount,
+      progressPercent: summary.progressPercent,
+      reached: summary.reached,
+      reachedAt: summary.reached ? (current.reachedAt || serverTimestamp()) : null,
+      reachedAtMs: summary.reached ? Number(current.reachedAtMs || Date.now()) : 0,
+      bonusApplied: summary.reached ? Boolean(extra.bonusApplied ?? current.bonusApplied) : false,
+      bonusAppliedAt: extra.bonusApplied ? (current.bonusAppliedAt || serverTimestamp()) : (current.bonusAppliedAt || null),
+      bonusAppliedAtMs: extra.bonusApplied ? Number(current.bonusAppliedAtMs || Date.now()) : Number(current.bonusAppliedAtMs || 0),
+      activeUsers: plan.activeUsers,
+      rewardedUsers: extra.rewardedUsers || current.rewardedUsers || [],
+      updatedAt: serverTimestamp(),
+      updatedAtMs: Date.now()
+    };
+    cachedDailyTarget = { ...current, ...payload };
+    try { await setDoc(doc(db, SERVER_DAILY_TARGETS_TABLE, serverTargetDocId(summary.dateKey)), payload, { merge: true }); }
+    catch (e) { console.warn('daily target server gagal', e?.code || e?.message || e); }
+  }
+  async function serverEnsureTargetNotification(summary, plan) {
+    const payload = {
+      dateKey: summary.dateKey,
+      type: 'daily_target_reached',
+      title: 'Target omzet harian tercapai',
+      message: `Target Rp ${formatRupiah(summary.targetAmount)} tercapai dengan omzet Rp ${formatRupiah(summary.totalAmount)}`,
+      targetAmount: summary.targetAmount,
+      totalAmount: summary.totalAmount,
+      reachedAt: serverTimestamp(),
+      reachedAtMs: Date.now(),
+      read: false,
+      createdAt: serverTimestamp(),
+      createdAtMs: Date.now()
+    };
+    const inserted = await serverInsertIfAbsent(SERVER_TARGET_NOTIFICATIONS_TABLE, serverTargetNotifId(summary.dateKey), payload);
+    if (inserted) {
+      cachedTargetNotification = { id: serverTargetNotifId(summary.dateKey), ...payload };
+      await serverNotifyTarget(summary, plan);
+    }
+  }
+  async function serverApplyDailyTarget() {
+    if (serverTargetApplying || !currentUser) return;
+    serverTargetApplying = true;
+    try {
+      await serverLoadTargetSettings();
+      const summary = serverDailyTargetSummary();
+      const plan = serverTargetRewardPlan(summary.dateKey);
+      const [targetSnap, notifSnap] = await Promise.all([
+        getDocFromServer(doc(db, SERVER_DAILY_TARGETS_TABLE, serverTargetDocId(summary.dateKey))).catch(() => null),
+        getDocFromServer(doc(db, SERVER_TARGET_NOTIFICATIONS_TABLE, serverTargetNotifId(summary.dateKey))).catch(() => null)
+      ]);
+      if (targetSnap?.exists()) cachedDailyTarget = targetSnap.data() || {};
+      if (notifSnap?.exists()) cachedTargetNotification = { id: notifSnap.id, ...(notifSnap.data() || {}) };
+      if (!summary.reached) {
+        await serverSaveTargetStatus(summary, plan, {});
+        return;
+      }
+      if (cachedDailyTarget?.bonusApplied === true) {
+        await serverSaveTargetStatus(summary, plan, { bonusApplied: true, rewardedUsers: cachedDailyTarget.rewardedUsers || [] });
+        return;
+      }
+      await serverSaveTargetStatus(summary, plan, {});
+      const amount = Number(summary.bonusAmount || 0);
+      if (amount <= 0) return;
+      const rewarded = [];
+      for (const user of plan.users) {
+        const username = sanitizeUsername(user.username || user.id);
+        if (!username) continue;
+        const bonusId = serverTargetBonusId(summary.dateKey, username);
+        const rewardId = serverTargetRewardId(summary.dateKey, username);
+        const existing = await getDocFromServer(doc(db, 'manualBonuses', bonusId)).catch(() => null);
+        const role = normalizeRole(user.role || 'staff');
+        const payload = {
+          user: username,
+          targetUsername: username,
+          name: user.name || username,
+          userRole: role,
+          role,
+          bonusGroup: 'staff',
+          amount,
+          dateKey: summary.dateKey,
+          monthKey: summary.dateKey.slice(0, 7),
+          type: 'daily_target_bonus',
+          source: 'daily_target',
+          note: 'Bonus target omzet harian tercapai',
+          description: 'Bonus otomatis karena target omzet harian gabungan tercapai',
+          action: 'add',
+          deleted: false,
+          createdAt: serverTimestamp(),
+          createdAtMs: Date.now()
+        };
+        if (!existing?.exists()) {
+          await setDoc(doc(db, 'manualBonuses', bonusId), payload, { merge: false });
+          upsertManualBonusRecord({ id: bonusId, ...payload });
+        }
+        rewarded.push(username);
+        await setDoc(doc(db, SERVER_TARGET_REWARDS_TABLE, rewardId), {
+          id: rewardId,
+          dateKey: summary.dateKey,
+          user: username,
+          targetUsername: username,
+          amount,
+          manualBonusId: bonusId,
+          type: 'daily_target_bonus',
+          source: 'daily_target',
+          rewardedAt: serverTimestamp(),
+          rewardedAtMs: Date.now()
+        }, { merge: true }).catch(() => {});
+      }
+      await serverSaveTargetStatus(summary, plan, { bonusApplied: true, rewardedUsers: rewarded });
+      await serverEnsureTargetNotification(summary, { ...plan, rewardedUsers: rewarded });
+    } catch (e) {
+      console.warn('server target harian gagal', e?.code || e?.message || e);
+    } finally {
+      serverTargetApplying = false;
+      adminDashboardPanelsHash = '';
+      renderAdminDashboardPanels();
+    }
+  }
+  function serverScheduleDailyTargetCheck() {
+    clearTimeout(serverTargetApplyTimer);
+    serverTargetApplyTimer = setTimeout(() => serverApplyDailyTarget(), 700);
+  }
+  function renderServerDailyTargetCard(summary = serverDailyTargetSummary()) {
+    const pct = Math.max(0, Math.min(100, summary.progressPercent || 0));
+    const pctText = (Math.round((summary.progressPercent || 0) * 10) / 10).toLocaleString('id-ID');
+    const reached = !!summary.reached;
+    const unread = reached && cachedTargetNotification?.read === false;
+    return `
+      <div class="card page-in s2" style="padding:11px 12px;margin-bottom:8px;border-color:${reached ? 'rgba(82,216,158,.24)' : 'rgba(79,124,255,.22)'};background:linear-gradient(135deg,${reached ? 'var(--green-dim)' : 'var(--accent-dim)'},var(--bg2))">
+        <div style="display:flex;justify-content:space-between;align-items:flex-start;gap:10px">
+          <div style="min-width:0">
+            <p class="label-xs" style="margin:0 0 4px;font-size:9px;color:${reached ? 'var(--green)' : 'var(--accent)'}">${reached ? 'Target omzet harian tercapai' : 'Target omzet harian'}</p>
+            <p style="font-family:var(--num-font);font-size:21px;font-weight:900;color:var(--text);line-height:1">Rp ${formatRupiah(summary.totalAmount)}</p>
+            <p style="font-size:10px;color:var(--text-soft);margin-top:5px;line-height:1.3">Target Rp ${formatRupiah(summary.targetAmount)} - Bonus Rp ${formatRupiah(summary.bonusAmount)} - ${reached ? 'status tercapai' : 'sisa Rp ' + formatRupiah(summary.remainingAmount)}</p>
+          </div>
+          <span class="user-chip" style="font-size:10px;padding:3px 7px;color:${reached ? 'var(--green)' : 'var(--accent)'};background:${reached ? 'var(--green-dim)' : 'var(--accent-dim)'};white-space:nowrap">${unread ? 'Baru' : (reached ? 'Tercapai' : pctText + '%')}</span>
+        </div>
+        <div style="height:9px;border-radius:999px;background:rgba(148,163,184,.24);overflow:hidden;margin-top:11px"><span style="display:block;height:100%;width:${pct}%;border-radius:999px;background:linear-gradient(90deg,var(--accent),var(--green))"></span></div>
+        <div style="display:grid;grid-template-columns:1fr 1fr;gap:8px;margin-top:10px">
+          <button onclick="openServerDailyTargetSettings()" class="btn" style="width:100%;padding:9px 10px;font-size:11px"><i class="fas fa-sliders"></i> Atur Target</button>
+          ${unread ? `<button onclick="markServerDailyTargetRead()" class="btn" style="width:100%;padding:9px 10px;font-size:11px;background:var(--green);color:#fff;border-color:var(--green)"><i class="fas fa-check"></i> Tandai dibaca</button>` : `<button onclick="manualRefreshData()" class="btn" style="width:100%;padding:9px 10px;font-size:11px"><i class="fas fa-rotate"></i> Refresh</button>`}
+        </div>
+      </div>`;
+  }
+  window.markServerDailyTargetRead = async function() {
+    const dk = toDateKey(nowDate()), id = serverTargetNotifId(dk);
+    try {
+      await setDoc(doc(db, SERVER_TARGET_NOTIFICATIONS_TABLE, id), { read: true, readAt: serverTimestamp(), readAtMs: Date.now(), readBy: currentUser?.username || 'admin' }, { merge: true });
+      cachedTargetNotification = { ...(cachedTargetNotification || {}), read: true };
+      adminDashboardPanelsHash = '';
+      renderAdminDashboardPanels();
+    } catch (e) {
+      showToast('Gagal tandai notifikasi target.', true);
+    }
+  };
+  window.openServerDailyTargetSettings = async function() {
+    const parseTargetMoney = value => Number(String(value || '').replace(/[^0-9-]/g, '')) || 0;
+    const summary = serverDailyTargetSummary();
+    const targetRaw = prompt('Target omzet hari ini', formatRupiah(summary.targetAmount));
+    if (targetRaw === null) return;
+    const bonusRaw = prompt('Bonus target per staff absen', formatRupiah(summary.bonusAmount));
+    if (bonusRaw === null) return;
+    const targetAmount = parseTargetMoney(targetRaw);
+    const bonusAmount = parseTargetMoney(bonusRaw);
+    if (targetAmount <= 0) return showToast('Target harus lebih dari 0', true);
+    if (bonusAmount < 0) return showToast('Bonus tidak boleh minus', true);
+    const pin = await askPin(`Simpan target hari ini?\nTarget: Rp ${formatRupiah(targetAmount)}\nBonus staff absen: Rp ${formatRupiah(bonusAmount)}\n\nMasukkan PIN admin:`);
+    if (!pin) return;
+    if (!(await requireCurrentAdminPin(pin))) return;
+    setLoading(true);
+    try {
+      const payload = {
+        id: 'daily_target',
+        dateKey: toDateKey(nowDate()),
+        targetAmount,
+        bonusAmount,
+        updatedAt: serverTimestamp(),
+        updatedAtMs: Date.now(),
+        updatedBy: currentUser?.username || 'admin',
+        updatedByName: currentUser?.name || currentUser?.username || 'Admin'
+      };
+      await setDoc(doc(db, SERVER_TARGET_SETTINGS_TABLE, 'daily_target'), payload, { merge: true });
+      cachedTargetSettings = payload;
+      cachedDailyTarget = null;
+      await serverApplyDailyTarget();
+      adminDashboardPanelsHash = '';
+      renderAdminDashboardPanels();
+      showToast('Target dan bonus disimpan');
+    } catch (e) {
+      showToast('Gagal simpan target: ' + (e.code || e.message || 'cek koneksi'), true);
+    }
+    setLoading(false);
+  };
 
 
   const getTheme = () => 'light';
@@ -2433,6 +2734,7 @@ Masukkan PIN admin:`);
       if (!username || !user) return showToast('Pilih user dulu!', true);
       if (!isManualBonusUser(user)) return showToast('Bonus manual hanya untuk Staff/Karyawan Harian aktif.', true);
       const role = normalizeRole(user.role || 'staff');
+      const trialFlags = getTrialFlags(user);
       if (!baseAmount || baseAmount <= 0) return showToast('Nominal bonus tidak valid!', true);
       if (!/^\d{4}-\d{2}$/.test(monthKey)) return showToast('Bulan bonus tidak valid!', true);
       const actionText = mode === 'subtract' ? 'Kurangi' : 'Tambahkan';
@@ -2470,6 +2772,7 @@ Masukkan PIN admin:`);
         time: dateToTimeInput(now),
         type: mode === 'subtract' ? 'manual_bonus_subtract' : 'manual_bonus_add',
         action: mode === 'subtract' ? 'subtract' : 'add',
+        ...trialFlags,
         deleted: false,
         createdAt: serverTimestamp(),
         createdAtMs: submitNow,
@@ -2637,7 +2940,7 @@ Masukkan PIN admin:`);
     return Math.max(0, currentMinutes - getClosingDeadlineMinutes(source));
   }
   function getStaffClosingUsers(dateKey = toDateKey(nowDate())) {
-    return activeUsers().filter(u => isClosingEligibleUser(u, dateKey));
+    return realActiveUsers().filter(u => isClosingEligibleUser(u, dateKey));
   }
   function hasUserAttendanceOnDate(username, dateKey = toDateKey(nowDate())) {
     const target = sanitizeUsername(username || '');
@@ -2652,7 +2955,7 @@ Masukkan PIN admin:`);
     const user = typeof userOrUsername === 'object' ? userOrUsername : getUserByUsername(userOrUsername);
     if (!user) return false;
     const uname = sanitizeUsername(user.username);
-    if (!uname || ADMIN_USERNAMES.includes(uname) || sanitizeUsername(user.role || 'staff') === 'admin') return false;
+    if (!uname || isDummyUser(user) || ADMIN_USERNAMES.includes(uname) || sanitizeUsername(user.role || 'staff') === 'admin') return false;
     // Aturan closing: karyawan harian boleh diclosing tanpa absen.
     // Staff biasa hanya boleh diclosing kalau sudah absen di tanggal tersebut.
     if (isDailyEmployee(user)) return true;
@@ -2800,6 +3103,7 @@ Masukkan PIN admin:`);
     const target = username && username !== 'all' ? sanitizeUsername(username) : null;
     return sortByCreatedDesc(dedupeManualBonusRecords(cachedManualBonuses || []).filter(b => {
       if (!b || b.deleted === true || b.deleted === 'true') return false;
+      if (isTrialRecord(b)) return false;
       const amount = Number(b.amount || 0);
       if (!Number.isFinite(amount) || amount === 0) return false;
       const bMonth = String(b.monthKey || extractDateKey(b).slice(0, 7) || '');
@@ -2845,6 +3149,7 @@ Masukkan PIN admin:`);
     const target = username && username !== 'all' ? sanitizeUsername(username) : null;
     return sortByCreatedDesc(dedupeManualBonusRecords(cachedManualBonuses || []).filter(b => {
       if (!b || b.deleted === true || b.deleted === 'true') return false;
+      if (isTrialRecord(b)) return false;
       const amount = Number(b.amount || 0);
       if (!Number.isFinite(amount) || amount === 0) return false;
       if (!recordMatchesBonusPeriod(b, period)) return false;
@@ -3327,6 +3632,7 @@ ${lockedByGlobal ? 'Hanya user ini yang dibuka dari closing global. Bonus closin
         snap.docs.map(d => ({ id: d.id, ...d.data() }))
       );
       handleAdminTransactionSnapshotNotifications(snap);
+      serverScheduleDailyTargetCheck();
       refreshCurrentPage();
     }, async (err) => {
       console.error(err);
@@ -3349,6 +3655,7 @@ ${lockedByGlobal ? 'Hanya user ini yang dibuka dari closing global. Bonus closin
         snap.docs.map(d => ({ id: d.id, ...d.data() }))
       );
       attendanceReady = true;
+      serverScheduleDailyTargetCheck();
       refreshCurrentPage();
     }, (err) => { attendanceReady = true; console.error(err); refreshCurrentPage(); });
 
@@ -3390,12 +3697,14 @@ ${lockedByGlobal ? 'Hanya user ini yang dibuka dari closing global. Bonus closin
       cachedManualBonuses = dedupeManualBonusRecords(
         snap.docs.map(d => ({ id: d.id, ...d.data() }))
       );
+      serverScheduleDailyTargetCheck();
       refreshCurrentPage();
     }, (err) => console.error('Manual bonus listener gagal:', err));
 
     const uq = query(collection(db, 'users'), orderBy('name'));
     unsubUsers = onSnapshot(uq, (snap) => {
       cachedUsers = snap.docs.map(d => ({ id: d.id, ...d.data() }));
+      serverScheduleDailyTargetCheck();
       refreshCurrentPage();
     }, (err) => console.error(err));
 
@@ -4084,6 +4393,7 @@ ${lockedByGlobal ? 'Hanya user ini yang dibuka dari closing global. Bonus closin
       const latest = await fetchLatestBonusBeforeTransaction(targetUsername);
       const freshUser = latest.user || targetUser || currentUser;
       const userBonus = latest.snapshot || getUserBonusSnapshot(freshUser);
+      const trialFlags = getTrialFlags(freshUser);
       if (!canTransactNow()) {
         showToast(isTransactionsClosedToday() ? 'Transaksi sudah closing. Terbuka otomatis besok.' : 'Absen dulu sebelum transaksi!', true);
         closeTransactionPaymentModal(true);
@@ -4117,6 +4427,7 @@ ${lockedByGlobal ? 'Hanya user ini yang dibuka dari closing global. Bonus closin
         transactionBonusPercent: userBonus.transactionBonusPercent,
         closingBonusPerMinuteSnapshot: userBonus.closingBonusPerMinute,
         bonusLogicVersion: 3,
+        ...trialFlags,
         notifyAdmin: false,
         notificationType: 'admin_manual_transaction',
         notificationStatus: 'skip',
@@ -4144,6 +4455,7 @@ ${lockedByGlobal ? 'Hanya user ini yang dibuka dari closing global. Bonus closin
         bonusPercent: userBonus.transactionBonusPercent,
         transactionBonusPercent: userBonus.transactionBonusPercent,
         closingBonusPerMinuteSnapshot: userBonus.closingBonusPerMinute,
+        ...trialFlags,
         paymentStatus: 'success',
         paymentCashOutType: paymentInfo.method === 'qris_transfer' ? 'qris' : '',
         isNonCashPayment: paymentInfo.method === 'qris_transfer',
@@ -4309,9 +4621,7 @@ ${lockedByGlobal ? 'Hanya user ini yang dibuka dari closing global. Bonus closin
   async function updateHomeStatus() {
     const el = $('home-status');
     if (!el) return;
-    const userCount = cachedUsers.length || new Set(cachedTransactions.map(t => t.user)).size || 0;
-    const activeToday = new Set(cachedAttendance.filter(a => !isRecordDeleted(a) && extractDateKey(a) === toDateKey(nowDate())).map(a => sanitizeUsername(a.user))).size;
-    el.innerHTML = `<div style="display:flex;flex-direction:column;gap:3px"><div style="display:flex;align-items:center;gap:8px;font-size:13px;font-weight:700;color:var(--accent)"><i class="fas fa-shield-halved"></i> Panel admin aktif</div><div style="font-size:12px;color:var(--text-soft)">Total user: ${userCount} - aktif hari ini: ${activeToday}</div><div style="font-size:11px;color:var(--text-ghost)">Admin bisa transaksi langsung tanpa absen.</div></div>`;
+    el.innerHTML = '';
   }
 
 
@@ -4794,7 +5104,7 @@ ${lockedByGlobal ? 'Hanya user ini yang dibuka dari closing global. Bonus closin
     };
 
     if (isAdmin()) {
-      activeUsers().forEach(u => {
+      realActiveUsers().forEach(u => {
         if (!ADMIN_USERNAMES.includes(sanitizeUsername(u.username))) ensureUser(u.username, u.name, u.role || 'staff');
       });
     } else if (currentUser?.username) {
@@ -5448,6 +5758,7 @@ ${lockedByGlobal ? 'Hanya user ini yang dibuka dari closing global. Bonus closin
       const closingValue = data ? getUserClosingBonusPerMinute(data.username) : '';
       $('admin-user-closing-minute').value = data ? String(closingValue) : '';
     }
+    if ($('admin-user-dummy')) $('admin-user-dummy').checked = !!(data && isDummyUser(data));
     updateAdminUserClosingLock();
   }
 
@@ -5486,6 +5797,7 @@ ${lockedByGlobal ? 'Hanya user ini yang dibuka dari closing global. Bonus closin
     if ($('admin-user-bonus-percent')) $('admin-user-bonus-percent').value = '';
     if ($('admin-user-daily-percent')) $('admin-user-daily-percent').value = '';
     if ($('admin-user-closing-minute')) $('admin-user-closing-minute').value = '';
+    if ($('admin-user-dummy')) $('admin-user-dummy').checked = false;
     updateAdminUserClosingLock();
   }
 
@@ -5496,6 +5808,7 @@ ${lockedByGlobal ? 'Hanya user ini yang dibuka dari closing global. Bonus closin
     const name = String($('admin-user-name')?.value || '').trim();
     const pin = String($('admin-user-pin')?.value || '').trim();
     const role = normalizeRole($('admin-user-role')?.value || 'staff');
+    const dummyMode = $('admin-user-dummy')?.checked === true;
     const bonusPercentRaw = String($('admin-user-bonus-percent')?.value || $('admin-user-daily-percent')?.value || '').replace(',', '.').trim();
     const closingRaw = String($('admin-user-closing-minute')?.value || '').replace(/\D/g, '').trim();
     const userBonusPercent = bonusPercentRaw === '' ? getTransactionBonusPercent() : Number(bonusPercentRaw);
@@ -5533,6 +5846,12 @@ ${lockedByGlobal ? 'Hanya user ini yang dibuka dari closing global. Bonus closin
         closingBonusPerMinute: (role === 'admin' || role === 'harian') ? 0 : userClosingPerMinute,
         dailyBonusRate: role === 'harian' ? userBonusPercent / 100 : 0,
         dailyBonusPercent: role === 'harian' ? userBonusPercent : 0,
+        isDummy: dummyMode,
+        trialMode: dummyMode,
+        accountType: dummyMode ? 'dummy' : 'normal',
+        excludeFromReports: dummyMode,
+        trialTargetAmount: dummyMode ? Number(existing?.trialTargetAmount || 10000) : 0,
+        trialBonusAmount: dummyMode ? Number(existing?.trialBonusAmount || 1000) : 0,
         bonusControlVersion: 3,
         active: true,
         deleted: false,
@@ -5549,7 +5868,7 @@ ${lockedByGlobal ? 'Hanya user ini yang dibuka dari closing global. Bonus closin
         updatedByName: currentUser.name || currentUser.username,
         createdAt: existing?.createdAt || serverTimestamp()
       }, { merge: true });
-      await logAudit('user_upsert', { username, role, existed: !!existing, restored: !!wasInactive, transactionBonusPercent: role === 'admin' ? 0 : userBonusPercent, closingBonusPerMinute: (role === 'admin' || role === 'harian') ? 0 : userClosingPerMinute });
+      await logAudit('user_upsert', { username, role, dummyMode, existed: !!existing, restored: !!wasInactive, transactionBonusPercent: role === 'admin' ? 0 : userBonusPercent, closingBonusPerMinute: (role === 'admin' || role === 'harian') ? 0 : userClosingPerMinute });
       showToast(existing ? '✓ User diperbarui' : '✓ User ditambahkan');
       selectedUserFilter = username;
       clearAdminUserForm();
@@ -7528,7 +7847,7 @@ Masukkan PIN admin:`);
   }
 
   function renderDailyEmployeeControlBody() {
-    const bonusUsers = activeUsers().filter(u => ['staff','harian'].includes(normalizeRole(u.role || 'staff')));
+    const bonusUsers = realActiveUsers().filter(u => ['staff','harian'].includes(normalizeRole(u.role || 'staff')));
     return `
       <div style="display:flex;justify-content:space-between;align-items:center;gap:10px;margin-bottom:10px">
         <p style="font-size:11px;color:var(--text-soft);margin:0">Kontrol bonus transaksi langsung per user. Untuk karyawan harian, bonus closing otomatis terkunci 0 karena tidak dapat bonus closing.</p>
@@ -7575,7 +7894,7 @@ Masukkan PIN admin:`);
       <div style="display:grid;grid-template-columns:1fr;gap:9px">
         <select id="admin-user-select" class="g-input" onchange="fillAdminUserForm(this.value)">
           <option value="">Pilih user untuk edit / nonaktifkan</option>
-          ${sortUsers(cachedUsers).map(u => `<option value="${escapeHtml(u.username)}">${escapeHtml(u.name)} (@${escapeHtml(u.username)}) · ${escapeHtml(getRoleDisplayName(u.role || 'staff').toUpperCase())} ${isUserActive(u) ? '' : '· NONAKTIF'}</option>`).join('')}
+          ${sortUsers(cachedUsers).map(u => `<option value="${escapeHtml(u.username)}">${escapeHtml(u.name)} (@${escapeHtml(u.username)}) · ${escapeHtml(getRoleDisplayName(u.role || 'staff').toUpperCase())}${isDummyUser(u) ? ' · TRIAL' : ''} ${isUserActive(u) ? '' : '· NONAKTIF'}</option>`).join('')}
         </select>
         <input id="admin-user-username" class="g-input" placeholder="username baru / username user" />
         <input id="admin-user-name" class="g-input" placeholder="nama user" />
@@ -7588,6 +7907,10 @@ Masukkan PIN admin:`);
         <input id="admin-user-bonus-percent" class="g-input" inputmode="decimal" placeholder="Bonus transaksi user (%) contoh staff 1.5 / harian 10" />
         <input id="admin-user-closing-minute" class="g-input" inputmode="numeric" pattern="[0-9]*" placeholder="Bonus closing user / menit contoh 100" />
         <div id="admin-user-closing-note" style="font-size:10.5px;color:var(--text-soft);margin-top:-4px;line-height:1.35"></div>
+        <label style="display:flex;align-items:flex-start;gap:9px;padding:10px 11px;border:1px solid rgba(245,158,11,.32);border-radius:12px;background:rgba(245,158,11,.10);font-size:11px;color:var(--text);line-height:1.35">
+          <input id="admin-user-dummy" type="checkbox" style="margin-top:2px;accent-color:#f59e0b" />
+          <span><b>Akun Dummy / Mode Trial</b><br><span style="color:var(--text-soft)">Data transaksi, absen, dan bonus dari akun ini diberi cap trial dan tidak masuk laporan utama/target real. Target trial bawaan Rp 10.000, bonus Rp 1.000.</span></span>
+        </label>
         <div style="padding:9px 11px;border:1px solid var(--border);border-radius:12px;background:var(--surface);font-size:10.5px;color:var(--text-soft);line-height:1.35">Bonus sekarang <b>per user</b>. Setiap transaksi dan closing baru menyimpan snapshot persen/nominal saat dibuat, jadi update bonus berikutnya tidak mengubah hitungan transaksi/closing lama. Role <b>staff</b> dan <b>karyawan harian</b> tetap dikunci saling eksklusif. Untuk <b>karyawan harian</b>, bonus closing otomatis terkunci 0.</div>
         ${renderDeviceLockRows()}
         <div style="display:grid;grid-template-columns:1fr 1fr 1fr;gap:8px">
@@ -7728,7 +8051,7 @@ Masukkan PIN admin:`);
     const hasMoreLogs = cachedAuditLogs.length > filteredLogs.length;
     const visibleDeletedTransactions = filteredDeletedTransactions.slice(0, recycleBinLimit);
     const hasMoreDeleted = filteredDeletedTransactions.length > visibleDeletedTransactions.length;
-    const adminAttendanceRows = isAdmin() ? activeUsers().map(u => ({ user: u, perf: getMonthlyAttendancePerformance(u.username) })) : [];
+    const adminAttendanceRows = isAdmin() ? realActiveUsers().map(u => ({ user: u, perf: getMonthlyAttendancePerformance(u.username) })) : [];
 
     const adminMenuCards = isAdmin() ? [
       ['attendance','Performa Absen Staff', 'Rata-rata jam absen bulanan staff', 'fa-user-clock'],
@@ -7763,7 +8086,7 @@ Masukkan PIN admin:`);
   }
 
   function getAttendanceAdminUsers() {
-    return activeUsers().filter(u => {
+    return realActiveUsers().filter(u => {
       const username = sanitizeUsername(u.username || u.id || '');
       return username && !ADMIN_USERNAMES.includes(username) && normalizeRole(u.role || 'staff') !== 'admin';
     });
@@ -8002,9 +8325,11 @@ Masukkan PIN admin:`);
       user: username,
       name: user.name || username,
       dateKey,
+      monthKey: dateKey.slice(0, 7),
       createdAt: Timestamp.fromMillis(createdAtMs),
       createdAtMs,
       manual: true,
+      ...getTrialFlags(user),
       deleted: false,
       updatedAt: serverTimestamp(),
       updatedAtMs: Date.now(),
@@ -8260,12 +8585,6 @@ Masukkan PIN admin:`);
                 </div>
                 <p id="home-cash-fisik-total" style="font-family:var(--num-font);font-size:20px;font-weight:900;color:#2563eb;line-height:1.05;margin-top:3px">Rp 0</p>
                 <p id="home-cash-fisik-info" style="display:none"></p>
-              </div>
-            </div>
-            <div class="card page-in s1" style="padding:10px 11px;margin-bottom:8px">
-              <div style="display:flex;justify-content:space-between;align-items:center;gap:8px;flex-wrap:wrap">
-                <div id="home-status"></div>
-                <div id="loc-info"><span class="loc-chip loc-loading" style="padding:4px 8px;font-size:10px"><i class="fas fa-circle-notch fa-spin" style="font-size:9px"></i> GPS...</span></div>
               </div>
             </div>
             <div class="card page-in s2" style="padding:10px 11px;margin-bottom:8px">
@@ -8659,6 +8978,7 @@ Masukkan PIN admin:`);
         : { id: RISMA_MANUAL_CLOSING_DOC_ID, enabled: true, allowedUsers: [], allowedNames: {} };
     }
     if (auditSnap) cachedAuditLogs = sortByCreatedDesc(auditSnap.docs.map(d => ({ id: d.id, ...d.data() })));
+    await serverApplyDailyTarget();
 
     applyNavRoleLabels();
     clearCashFisikCacheForRefresh();
