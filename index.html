@@ -1894,6 +1894,87 @@
   function serverTargetBonusId(dateKey, username) { return `targetbonus_${String(dateKey || toDateKey(nowDate())).slice(0, 10)}_${sanitizeUsername(username)}`; }
   function serverTargetRewardId(dateKey, username) { return `targetreward_${String(dateKey || toDateKey(nowDate())).slice(0, 10)}_${sanitizeUsername(username)}`; }
   function serverTargetNotifId(dateKey = toDateKey(nowDate())) { return `targetnotif_${String(dateKey || toDateKey(nowDate())).slice(0, 10)}`; }
+  function isTargetAutoBonusRow(row = {}) {
+    return String(row.source || '') === 'daily_target'
+      || String(row.type || '') === 'daily_target_bonus'
+      || String(row.id || '').startsWith('targetbonus_');
+  }
+  async function resetServerTargetAutoBonusAfterDelete(row = {}) {
+    if (!isTargetAutoBonusRow(row)) return;
+    const username = sanitizeUsername(row.user || row.targetUsername || row.username || '');
+    const dateKey = String(row.dateKey || extractDateKey(row) || toDateKey(nowDate())).slice(0, 10);
+    if (!username || !dateKey) return;
+    const rewardId = serverTargetRewardId(dateKey, username);
+    const targetId = serverTargetDocId(dateKey);
+    const nowMs = Date.now();
+    await setDoc(doc(db, SERVER_TARGET_REWARDS_TABLE, rewardId), {
+      deleted: true,
+      resetAt: serverTimestamp(),
+      resetAtMs: nowMs,
+      resetBy: currentUser?.username || 'server',
+      resetByName: currentUser?.name || 'Server Rocky',
+      staffNotificationSent: false,
+      staffNotificationStatus: 'reset',
+      staffNotifiedAtMs: 0,
+      updatedAt: serverTimestamp(),
+      updatedAtMs: nowMs
+    }, { merge: true }).catch(() => {});
+    const current = String(cachedDailyTarget?.dateKey || '') === dateKey ? (cachedDailyTarget || {}) : {};
+    const rewardedUsers = (current.rewardedUsers || []).map(sanitizeUsername).filter(u => u && u !== username);
+    const patch = {
+      bonusApplied: false,
+      rewardedUsers,
+      resetAt: serverTimestamp(),
+      resetAtMs: nowMs,
+      resetBy: currentUser?.username || 'server',
+      resetByName: currentUser?.name || 'Server Rocky',
+      updatedAt: serverTimestamp(),
+      updatedAtMs: nowMs
+    };
+    await setDoc(doc(db, SERVER_DAILY_TARGETS_TABLE, targetId), patch, { merge: true }).catch(() => {});
+    if (String(cachedDailyTarget?.dateKey || '') === dateKey) cachedDailyTarget = { ...cachedDailyTarget, ...patch };
+  }
+  function mergeServerTargetUsers(...groups) {
+    const set = new Set();
+    groups.flat().forEach(u => { const k = sanitizeUsername(u); if (k) set.add(k); });
+    return [...set];
+  }
+  async function revokeServerDailyTargetBonuses(summary, plan, previous = {}) {
+    const dateKey = String(summary?.dateKey || toDateKey(nowDate())).slice(0, 10);
+    const nowMs = Date.now();
+    const users = mergeServerTargetUsers(plan?.rewardedUsers || [], previous?.rewardedUsers || [], cachedDailyTarget?.rewardedUsers || [], (plan?.users || []).map(u => u?.username || u?.id));
+    for (const username of users) {
+      const bonusId = serverTargetBonusId(dateKey, username);
+      const rewardId = serverTargetRewardId(dateKey, username);
+      try {
+        const snap = await getDocFromServer(doc(db, 'manualBonuses', bonusId)).catch(() => null);
+        const row = snap?.exists() ? { id: bonusId, ...(snap.data() || {}) } : null;
+        if (row && !isRecordDeleted(row) && isTargetAutoBonusRow(row)) {
+          const patch = { deleted: true, status: 'deleted', deletedAt: serverTimestamp(), deletedAtMs: nowMs, deletedBy: 'target_auto', deletedByName: 'Target Otomatis Rocky', deleteReason: 'Omzet turun di bawah target harian', updatedAt: serverTimestamp(), updatedAtMs: nowMs };
+          await setDoc(doc(db, 'manualBonuses', bonusId), patch, { merge: true });
+          upsertManualBonusRecord({ ...row, ...patch, id: bonusId });
+        }
+        await setDoc(doc(db, SERVER_TARGET_REWARDS_TABLE, rewardId), {
+          deleted: true,
+          resetAt: serverTimestamp(),
+          resetAtMs: nowMs,
+          resetBy: 'target_auto',
+          resetByName: 'Target Otomatis Rocky',
+          resetReason: 'Omzet turun di bawah target harian',
+          staffNotificationSent: false,
+          staffNotificationStatus: 'reset',
+          staffNotifiedAtMs: 0,
+          updatedAt: serverTimestamp(),
+          updatedAtMs: nowMs
+        }, { merge: true }).catch(() => {});
+      } catch (e) {
+        console.warn('rollback bonus target server gagal', username, e?.code || e?.message || e);
+      }
+    }
+    await deleteDoc(doc(db, SERVER_TARGET_NOTIFICATIONS_TABLE, serverTargetNotifId(dateKey))).catch(() => {});
+    cachedTargetNotification = null;
+    await serverSaveTargetStatus(summary, plan, { bonusApplied: false, rewardedUsers: [] });
+  }
   function serverTargetNumber(data, keys, fallback) {
     for (const key of keys) {
       const n = Number(data?.[key]);
@@ -1961,7 +2042,7 @@
       await fetch(ROCKY_NOTIFY_TARGET_URL, {
         method: 'POST',
         headers: { 'Content-Type': 'application/json', 'X-Notify-Secret': ROCKY_NOTIFY_SECRET },
-        body: JSON.stringify({ secret: ROCKY_NOTIFY_SECRET, dateKey: summary.dateKey, targetAmount: summary.targetAmount, totalAmount: summary.totalAmount, activeUsers: plan.activeUsers, rewardedUsers: plan.rewardedUsers })
+        body: JSON.stringify({ secret: ROCKY_NOTIFY_SECRET, dateKey: summary.dateKey, targetAmount: summary.targetAmount, totalAmount: summary.totalAmount, bonusAmount: summary.bonusAmount, activeUsers: plan.activeUsers, rewardedUsers: plan.rewardedUsers })
       });
     } catch (e) {
       console.warn('notify target server gagal', e?.message || e);
@@ -2021,13 +2102,61 @@
     }
   }
   async function serverEnsureStaffTargetBonusNotifications(summary, plan, amount) {
-    const sent = [];
-    if (Number(amount || 0) <= 0) return sent;
+    const rewarded = [];
+    if (Number(amount || 0) <= 0) return rewarded;
     for (const user of plan.users || []) {
-      const ok = await serverEnsureStaffTargetBonusNotification(summary, user, amount);
-      if (ok) sent.push(sanitizeUsername(user.username || user.id));
+      const username = sanitizeUsername(user?.username || user?.id || '');
+      if (!username) continue;
+      const bonusId = serverTargetBonusId(summary.dateKey, username);
+      const rewardId = serverTargetRewardId(summary.dateKey, username);
+      const existing = await getDocFromServer(doc(db, 'manualBonuses', bonusId)).catch(() => null);
+      const existingData = existing?.exists() ? (existing.data() || {}) : null;
+      const existingActive = !!existingData && !isRecordDeleted(existingData);
+      const role = normalizeRole(user.role || 'staff');
+      let staffNotificationSent = false;
+      const payload = {
+        user: username,
+        targetUsername: username,
+        name: user.name || username,
+        userRole: role,
+        role,
+        bonusGroup: 'staff',
+        amount,
+        dateKey: summary.dateKey,
+        monthKey: summary.dateKey.slice(0, 7),
+        type: 'daily_target_bonus',
+        source: 'daily_target',
+        note: 'Bonus target omzet harian tercapai',
+        description: 'Bonus otomatis karena target omzet harian gabungan tercapai',
+        action: 'add',
+        deleted: false,
+        createdAt: serverTimestamp(),
+        createdAtMs: Date.now()
+      };
+      if (!existingActive) {
+        await setDoc(doc(db, 'manualBonuses', bonusId), payload, { merge: false });
+        upsertManualBonusRecord({ id: bonusId, ...payload });
+        const notifyResult = await notifyStaffManualBonusFromServer({ id: bonusId, docId: bonusId, ...payload }, user);
+        staffNotificationSent = !!notifyResult && notifyResult.ok !== false;
+      } else {
+        staffNotificationSent = await serverEnsureStaffTargetBonusNotification(summary, user, amount);
+      }
+      rewarded.push(username);
+      await setDoc(doc(db, SERVER_TARGET_REWARDS_TABLE, rewardId), {
+        id: rewardId,
+        dateKey: summary.dateKey,
+        user: username,
+        targetUsername: username,
+        amount,
+        manualBonusId: bonusId,
+        type: 'daily_target_bonus',
+        source: 'daily_target',
+        rewardedAt: serverTimestamp(),
+        rewardedAtMs: Date.now(),
+        ...(staffNotificationSent ? { staffNotificationSent: true, staffNotificationStatus: 'sent', staffNotifiedAt: serverTimestamp(), staffNotifiedAtMs: Date.now() } : {})
+      }, { merge: true }).catch(() => {});
     }
-    return sent;
+    return rewarded;
   }
   async function serverSaveTargetStatus(summary, plan, extra = {}) {
     const current = cachedDailyTarget || {};
@@ -2056,9 +2185,10 @@
       dateKey: summary.dateKey,
       type: 'daily_target_reached',
       title: 'Target omzet harian tercapai',
-      message: `Target Rp ${formatRupiah(summary.targetAmount)} tercapai dengan omzet Rp ${formatRupiah(summary.totalAmount)}`,
+      message: `Target omzet harian sudah tercapai. Bonus target Rp ${formatRupiah(summary.bonusAmount)} otomatis masuk.`,
       targetAmount: summary.targetAmount,
       totalAmount: summary.totalAmount,
+      bonusAmount: summary.bonusAmount,
       reachedAt: serverTimestamp(),
       reachedAtMs: Date.now(),
       read: false,
@@ -2085,68 +2215,19 @@
       if (targetSnap?.exists()) cachedDailyTarget = targetSnap.data() || {};
       if (notifSnap?.exists()) cachedTargetNotification = { id: notifSnap.id, ...(notifSnap.data() || {}) };
       if (!summary.reached) {
-        await serverSaveTargetStatus(summary, plan, {});
+        await revokeServerDailyTargetBonuses(summary, plan, cachedDailyTarget || {});
         return;
       }
       const amount = Number(summary.bonusAmount || 0);
       if (cachedDailyTarget?.bonusApplied === true) {
-        await serverEnsureStaffTargetBonusNotifications(summary, plan, amount);
-        await serverSaveTargetStatus(summary, plan, { bonusApplied: true, rewardedUsers: cachedDailyTarget.rewardedUsers || [] });
+        const rewarded = await serverEnsureStaffTargetBonusNotifications(summary, plan, amount);
+        const mergedRewarded = [...new Set([...(cachedDailyTarget.rewardedUsers || []).map(sanitizeUsername), ...rewarded.map(sanitizeUsername)].filter(Boolean))];
+        await serverSaveTargetStatus(summary, plan, { bonusApplied: true, rewardedUsers: mergedRewarded });
         return;
       }
       await serverSaveTargetStatus(summary, plan, {});
       if (amount <= 0) return;
-      const rewarded = [];
-      for (const user of plan.users) {
-        const username = sanitizeUsername(user.username || user.id);
-        if (!username) continue;
-        const bonusId = serverTargetBonusId(summary.dateKey, username);
-        const rewardId = serverTargetRewardId(summary.dateKey, username);
-        const existing = await getDocFromServer(doc(db, 'manualBonuses', bonusId)).catch(() => null);
-        const role = normalizeRole(user.role || 'staff');
-        let staffNotificationSent = false;
-        const payload = {
-          user: username,
-          targetUsername: username,
-          name: user.name || username,
-          userRole: role,
-          role,
-          bonusGroup: 'staff',
-          amount,
-          dateKey: summary.dateKey,
-          monthKey: summary.dateKey.slice(0, 7),
-          type: 'daily_target_bonus',
-          source: 'daily_target',
-          note: 'Bonus target omzet harian tercapai',
-          description: 'Bonus otomatis karena target omzet harian gabungan tercapai',
-          action: 'add',
-          deleted: false,
-          createdAt: serverTimestamp(),
-          createdAtMs: Date.now()
-        };
-        if (!existing?.exists()) {
-          await setDoc(doc(db, 'manualBonuses', bonusId), payload, { merge: false });
-          upsertManualBonusRecord({ id: bonusId, ...payload });
-          const notifyResult = await notifyStaffManualBonusFromServer({ id: bonusId, docId: bonusId, ...payload }, user);
-          staffNotificationSent = !!notifyResult && notifyResult.ok !== false;
-        } else {
-          staffNotificationSent = await serverEnsureStaffTargetBonusNotification(summary, user, amount);
-        }
-        rewarded.push(username);
-        await setDoc(doc(db, SERVER_TARGET_REWARDS_TABLE, rewardId), {
-          id: rewardId,
-          dateKey: summary.dateKey,
-          user: username,
-          targetUsername: username,
-          amount,
-          manualBonusId: bonusId,
-          type: 'daily_target_bonus',
-          source: 'daily_target',
-          rewardedAt: serverTimestamp(),
-          rewardedAtMs: Date.now(),
-          ...(staffNotificationSent ? { staffNotificationSent: true, staffNotificationStatus: 'sent', staffNotifiedAt: serverTimestamp(), staffNotifiedAtMs: Date.now() } : {})
-        }, { merge: true }).catch(() => {});
-      }
+      const rewarded = await serverEnsureStaffTargetBonusNotifications(summary, plan, amount);
       await serverSaveTargetStatus(summary, plan, { bonusApplied: true, rewardedUsers: rewarded });
       await serverEnsureTargetNotification(summary, { ...plan, rewardedUsers: rewarded });
     } catch (e) {
@@ -2739,9 +2820,12 @@ Masukkan PIN admin:`);
       const label = role === 'harian' ? 'HARIAN' : 'STAFF';
       return `<option value="${escapeHtml(u.username)}" ${sanitizeUsername(u.username) === sanitizeUsername(defaultUser) ? 'selected' : ''}>${escapeHtml(u.name || u.username)} (@${escapeHtml(u.username)}) · ${label}</option>`;
     }).join('');
-    const allRows = getMonthlyManualBonuses(null, month);
+    const monthBonusRows = getMonthlyManualBonuses(null, month);
+    const allRows = monthBonusRows.filter(b => !isTargetAutoBonusRow(b));
+    const autoRows = monthBonusRows.filter(isTargetAutoBonusRow).slice(0, 30);
+    const autoTotal = autoRows.reduce((sum, b) => sum + Number(b.amount || 0), 0);
     const rows = allRows.slice(0, 30);
-    const totalManual = getMonthlyManualBonus(null, month);
+    const totalManual = allRows.reduce((sum, b) => sum + Number(b.amount || 0), 0);
     const rowsInfo = allRows.length > rows.length ? `Tampil ${rows.length} terbaru dari ${allRows.length} data` : `${rows.length} data`;
     const totalColor = totalManual < 0 ? 'var(--red)' : 'var(--amber)';
     return `<div class="card" style="padding:14px 16px;background:var(--surface);border-color:rgba(255,196,107,.16)">
@@ -2806,6 +2890,32 @@ Masukkan PIN admin:`);
               </div>
             </div>`;
           }).join('') : `<div style="font-size:11px;color:var(--text-soft);padding:9px 10px;border:1px dashed var(--border);border-radius:11px">Belum ada bonus manual bulan ini.</div>`}
+        </div>
+      </div>
+      <div style="margin-top:13px;border-top:1px solid var(--border);padding-top:11px">
+        <div style="display:flex;justify-content:space-between;align-items:center;gap:8px;margin-bottom:8px">
+          <div>
+            <p class="label-xs" style="margin:0;color:var(--green)">Bonus Target Otomatis</p>
+            <p style="font-size:10.5px;color:var(--text-soft);margin-top:3px">Dibuat otomatis saat target omzet tercapai. Hapus di sini untuk reset bonus target staff terkait.</p>
+          </div>
+          <span class="status-pill status-ok" style="color:var(--green)">Rp ${formatRupiah(autoTotal)}</span>
+        </div>
+        <div style="display:flex;flex-direction:column;gap:7px;max-height:220px;overflow-y:auto;overscroll-behavior:contain;padding-right:2px">
+          ${autoRows.length ? autoRows.map(b => {
+            const amount = Number(b.amount || 0);
+            const rowId = escapeHtml(b.id || '');
+            return `<div style="display:flex;justify-content:space-between;gap:8px;padding:9px 10px;border:1px solid var(--border);border-radius:11px;background:var(--bg2);align-items:center">
+              <div style="min-width:0;flex:1">
+                <div style="font-size:12px;font-weight:800;white-space:nowrap;overflow:hidden;text-overflow:ellipsis">${escapeHtml(b.name || b.user || '-')}</div>
+                <div style="font-size:10px;color:var(--text-soft);margin-top:3px;white-space:nowrap;overflow:hidden;text-overflow:ellipsis">${escapeHtml(b.note || 'Bonus target omzet harian tercapai')} Â· ${escapeHtml(b.dateKey || '-')}</div>
+                <div style="font-size:9.5px;color:var(--green);font-weight:800;margin-top:4px">Bonus otomatis target</div>
+              </div>
+              <div style="display:flex;align-items:center;gap:7px;flex-shrink:0">
+                <strong style="font-family:var(--num-font);font-size:13px;color:var(--green)">+ Rp ${formatRupiah(amount)}</strong>
+                ${rowId ? `<button onclick="deleteManualBonus('${rowId}')" class="btn btn-danger" title="Reset bonus target otomatis" style="width:30px;height:30px;padding:0;border-radius:9px"><i class="fas fa-trash"></i></button>` : ''}
+              </div>
+            </div>`;
+          }).join('') : `<div style="font-size:11px;color:var(--text-soft);padding:9px 10px;border:1px dashed var(--border);border-radius:11px">Belum ada bonus target otomatis bulan ini.</div>`}
         </div>
       </div>
     </div>`;
@@ -2903,7 +3013,8 @@ Masukkan PIN admin:`);
     const item = (cachedManualBonuses || []).find(b => String(b.id) === bonusId);
     if (!item) return showToast('Data bonus tidak ditemukan!', true);
     const amount = Number(item.amount || 0);
-    const pin = await askPin(`Hapus catatan bonus manual ${item.name || item.user || ''}?\nNilai: ${amount < 0 ? '-' : '+'} Rp ${formatRupiah(Math.abs(amount))}\nBulan: ${item.monthKey || '-'}\n\nMasukkan PIN admin:`);
+    const autoTarget = isTargetAutoBonusRow(item);
+    const pin = await askPin(`Hapus catatan ${autoTarget ? 'bonus target otomatis' : 'bonus manual'} ${item.name || item.user || ''}?\nNilai: ${amount < 0 ? '-' : '+'} Rp ${formatRupiah(Math.abs(amount))}\nBulan: ${item.monthKey || '-'}\n\nMasukkan PIN admin:`);
     if (!pin) return;
     if (!(await requireCurrentAdminPin(pin))) return;
     if (!confirm('Catatan bonus ini akan dihapus dari perhitungan Bonus ++. Lanjutkan?')) return;
@@ -2916,6 +3027,7 @@ Masukkan PIN admin:`);
         deletedBy: currentUser.username,
         deletedByName: currentUser.name
       }, { merge: true });
+      if (autoTarget) await resetServerTargetAutoBonusAfterDelete(item);
       cachedManualBonuses = dedupeManualBonusRecords(cachedManualBonuses.map(b => String(b.id) === bonusId ? { ...b, deleted: true, deletedAtMs: Date.now(), deletedBy: currentUser.username, deletedByName: currentUser.name } : b));
       await logAudit('manual_bonus_delete', { id: bonusId, user: item.user || '', name: item.name || '', amount, monthKey: item.monthKey || '', note: item.note || '' });
       showToast('✓ Bonus manual dihapus dari perhitungan');
@@ -4603,6 +4715,14 @@ ${lockedByGlobal ? 'Hanya user ini yang dibuka dari closing global. Bonus closin
         deletedByName: currentUser.name
       }, { merge: true });
       await logAudit('transaction_soft_delete', { id, user: trx.user, amount: Number(trx.amount || 0), note: trx.note || 'Transaksi' });
+      cachedTransactions = cachedTransactions.map(t => String(t.id) === String(id) ? {
+        ...t,
+        deleted: true,
+        deletedAtMs: Date.now(),
+        deletedBy: currentUser.username,
+        deletedByName: currentUser.name
+      } : t);
+      await serverApplyDailyTarget();
       showToast(`✓ Transaksi dihapus aman`);
       await refreshCurrentPage();
     } catch (e) {
