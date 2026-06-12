@@ -3170,14 +3170,31 @@ Masukkan PIN admin:`);
       extractDateKey(a) === dateKey
     );
   }
+  function isRismaSpecialClosingUser(userOrUsername) {
+    const username = typeof userOrUsername === 'object'
+      ? sanitizeUsername(userOrUsername?.username || userOrUsername?.user || userOrUsername?.id || '')
+      : sanitizeUsername(userOrUsername || '');
+    return username === 'risma';
+  }
+  function hasRismaTransactionOnDate(dateKey = toDateKey(nowDate())) {
+    const targetDate = String(dateKey || toDateKey(nowDate())).slice(0, 10);
+    return getVisibleTransactions().some(t =>
+      !isRecordDeleted(t) &&
+      String(t.dateKey || extractDateKey(t) || '').slice(0, 10) === targetDate &&
+      sanitizeUsername(t.user || t.username || t.kasir || t.createdBy || '') === 'risma' &&
+      Number(t.amount || 0) > 0
+    );
+  }
   function isClosingEligibleUser(userOrUsername, dateKey = toDateKey(nowDate())) {
     const user = typeof userOrUsername === 'object' ? userOrUsername : getUserByUsername(userOrUsername);
     if (!user) return false;
     const uname = sanitizeUsername(user.username);
     if (!uname || isDummyUser(user) || ADMIN_USERNAMES.includes(uname) || sanitizeUsername(user.role || 'staff') === 'admin') return false;
     // Aturan closing: karyawan harian boleh diclosing tanpa absen.
-    // Staff biasa hanya boleh diclosing kalau sudah absen di tanggal tersebut.
+    // User khusus Risma dianggap hadir hanya kalau sudah ada transaksi Risma hari itu.
+    // Staff biasa tetap wajib sudah absen di tanggal tersebut.
     if (isDailyEmployee(user)) return true;
+    if (isRismaSpecialClosingUser(user)) return hasRismaTransactionOnDate(dateKey);
     return hasUserAttendanceOnDate(uname, dateKey);
   }
   function hasUserClosingOnDate(username, dateKey = toDateKey(nowDate())) {
@@ -3196,7 +3213,7 @@ Masukkan PIN admin:`);
   }
   function buildClosingBonusByUser(delayMinutes, targetUsername = null, dateKey = toDateKey(nowDate())) {
     const target = targetUsername ? sanitizeUsername(targetUsername) : null;
-    const allStaffTargets = getStaffClosingUsers();
+    const allStaffTargets = getStaffClosingUsers(dateKey);
     const targetUsers = target
       ? allStaffTargets.filter(u => sanitizeUsername(u.username) === target)
       : allStaffTargets;
@@ -3210,9 +3227,10 @@ Masukkan PIN admin:`);
       : targetUsers.filter(u => !hasUserClosingOnDate(u.username, dateKey));
 
     // Bonus closing tetap untuk staff biasa yang sudah absen hari ini.
+    // User khusus Risma ikut bonus hanya kalau sudah ada transaksi Risma hari itu.
     // Nilainya sekarang per user dan disimpan sebagai snapshot saat closing dibuat.
     const delay = Number(delayMinutes || 0);
-    const bonusUsers = eligibleUsers.filter(u => !isDailyEmployee(u) && hasUserAttendanceOnDate(u.username, dateKey));
+    const bonusUsers = eligibleUsers.filter(u => !isDailyEmployee(u) && (hasUserAttendanceOnDate(u.username, dateKey) || (isRismaSpecialClosingUser(u) && hasRismaTransactionOnDate(dateKey))));
     const bonusPerMinuteByUser = {};
     const bonusByUser = bonusUsers.reduce((acc, u) => {
       const uname = sanitizeUsername(u.username);
@@ -3459,7 +3477,7 @@ Masukkan PIN admin:`);
     const existing = targetUsername ? (existingUserClosing || existingGlobalClosing) : existingGlobalClosing;
     if (existing) return showToast(targetUsername ? (existingGlobalClosing && !existingUserClosing ? 'User ini sudah terkunci oleh closing global hari ini!' : 'User ini sudah closing hari ini!') : 'Global hari ini sudah closing!', true);
     const pin = await askPin(`Closing transaksi ${targetUsername ? 'untuk ' + getClosingTargetLabel(targetUser) : 'SEMUA USER'} tanggal ${today}?
-${targetUsername ? 'Hanya user ini yang terkunci. User lain tetap bisa transaksi.' : 'Hanya user yang sudah absen atau karyawan harian yang masuk target closing.'}
+${targetUsername ? 'Hanya user ini yang terkunci. User lain tetap bisa transaksi.' : 'Hanya user yang sudah absen, karyawan harian, atau Risma yang sudah transaksi hari ini yang masuk target closing.'}
 Masukkan PIN admin:`);
     if (!pin) return;
     if (!(await requireCurrentAdminPin(pin))) return;
@@ -3467,15 +3485,15 @@ Masukkan PIN admin:`);
     const deadlineSnapshot = getClosingDeadlineSnapshot();
     const delayMinutes = getClosingDelayMinutes(nowDate(), deadlineSnapshot);
     const { users, targetUsers, bonusByUser, bonusPerMinuteByUser, bonusPerUser, totalBonus } = buildClosingBonusByUser(delayMinutes, targetUsername, today);
-    if (targetUsername && !targetUsers.length) return showToast('User belum absen / bukan karyawan harian, jadi tidak perlu closing.', true);
-    if (!targetUsername && !targetUsers.length) return showToast('Belum ada user yang sudah absen atau karyawan harian untuk closing.', true);
+    if (targetUsername && !targetUsers.length) return showToast('User belum absen / bukan karyawan harian / Risma belum transaksi, jadi tidak perlu closing.', true);
+    if (!targetUsername && !targetUsers.length) return showToast('Belum ada user yang sudah absen, karyawan harian, atau Risma yang sudah transaksi untuk closing.', true);
     if (!confirm(`Yakin closing ${targetUsername ? getClosingTargetLabel(targetUser) : 'SEMUA USER'} sekarang?
 Deadline: ${deadlineSnapshot.deadline}
 Lewat deadline: ${delayMinutes} menit
 Bonus closing: per user sesuai setting masing-masing
 Target closing valid: ${targetUsers.length} · layak bonus: ${users.length}
 Total bonus closing: Rp ${formatRupiah(totalBonus)}
-${users.length ? '' : 'Catatan: staff belum absen tidak ikut diclosing; karyawan harian tetap bisa diclosing tanpa bonus.'}`)) return;
+${users.length ? '' : 'Catatan: staff belum absen tidak ikut diclosing; karyawan harian tetap bisa diclosing tanpa bonus; Risma ikut hanya kalau sudah transaksi hari ini.'}`)) return;
     setLoading(true);
     try {
       const docId = getClosingDocId(today, targetUsername);
@@ -4912,14 +4930,14 @@ ${lockedByGlobal ? 'Hanya user ini yang dibuka dari closing global. Bonus closin
         </span>
         <input class="risma-manual-target" type="checkbox" value="${escapeHtml(uname)}" ${checked} style="width:18px;height:18px;accent-color:var(--accent);flex-shrink:0">
       </label>`;
-    }).join('') : `<div style="font-size:12px;color:var(--text-soft);padding:12px;border:1px dashed var(--border);border-radius:12px;text-align:center">Belum ada user yang sudah absen atau karyawan harian aktif.</div>`;
+    }).join('') : `<div style="font-size:12px;color:var(--text-soft);padding:12px;border:1px dashed var(--border);border-radius:12px;text-align:center">Belum ada user yang sudah absen, karyawan harian aktif, atau transaksi Risma hari ini.</div>`;
     return `<div style="margin-top:10px;background:linear-gradient(145deg,var(--bg3),var(--bg2));border:1px solid rgba(190,24,93,.22);border-radius:18px;padding:14px;box-shadow:0 10px 28px rgba(0,0,0,.12);position:relative;overflow:hidden">
       <div style="position:absolute;top:-44px;right:-50px;width:132px;height:132px;background:radial-gradient(circle,rgba(190,24,93,.16) 0%,transparent 70%);pointer-events:none"></div>
       <div style="display:flex;align-items:flex-start;justify-content:space-between;gap:10px;position:relative;z-index:1;margin-bottom:10px">
         <div style="min-width:0;flex:1">
           <p class="label-xs" style="margin:0 0 6px">Closing Manual</p>
           <div style="font-size:16px;font-weight:900;letter-spacing:-.02em;line-height:1.2">Arahan Closing untuk Risma</div>
-          <div style="font-size:11px;color:var(--text-soft);margin-top:5px;line-height:1.35">Admin pilih user yang boleh diclosing oleh Risma. Yang muncul hanya staff yang sudah absen hari ini dan karyawan harian.</div>
+          <div style="font-size:11px;color:var(--text-soft);margin-top:5px;line-height:1.35">Admin pilih user yang boleh diclosing oleh Risma. Yang muncul hanya staff yang sudah absen hari ini, karyawan harian, dan Risma kalau sudah transaksi.</div>
         </div>
         <span class="status-pill status-ok" style="font-size:10px;padding:6px 10px;white-space:nowrap"><i class="fas fa-user-check"></i> ${selectedCount} target</span>
       </div>
@@ -4929,7 +4947,7 @@ ${lockedByGlobal ? 'Hanya user ini yang dibuka dari closing global. Bonus closin
       </div>
       <div style="display:grid;grid-template-columns:1fr;gap:7px;max-height:220px;overflow:auto;position:relative;z-index:1;margin-bottom:10px">${rows}</div>
       <button onclick="saveRismaManualClosingConfig()" class="btn btn-primary" style="width:100%;min-height:42px;padding:11px 12px;font-size:13px;border-radius:14px;font-weight:900;position:relative;z-index:1"><i class="fas fa-paper-plane"></i> Simpan Arahan ke Risma</button>
-      <div style="font-size:10px;color:var(--text-soft);line-height:1.35;margin-top:8px;position:relative;z-index:1">Catatan: ini tidak langsung closing. Staff yang tidak absen tidak masuk target, karena tidak hadir memang tidak perlu diclosing.</div>
+      <div style="font-size:10px;color:var(--text-soft);line-height:1.35;margin-top:8px;position:relative;z-index:1">Catatan: ini tidak langsung closing. Staff yang tidak absen tidak masuk target; Risma ikut hanya kalau sudah ada transaksi hari ini.</div>
     </div>`;
   }
   async function saveRismaManualClosingConfig() {
@@ -4993,7 +5011,7 @@ ${lockedByGlobal ? 'Hanya user ini yang dibuka dari closing global. Bonus closin
     const mainTitle = closing ? `Closing ${closingJam || '--:--'} WIB` : `Belum Closing ${targetUsername ? targetUser.name : 'Global'}`;
     const mainDesc = closing
       ? (lockedByGlobal ? 'User ini sudah terkunci oleh closing global hari ini.' : (targetUsername ? 'User ini terkunci transaksi. User lain tetap bisa jalan.' : 'Semua staff terkunci transaksi sampai ganti tanggal.'))
-      : `Pilih user yang sudah absen hari ini atau karyawan harian. Yang tidak hadir tidak perlu diclosing.`;
+      : `Pilih user yang sudah absen hari ini, karyawan harian, atau Risma yang sudah transaksi. Yang tidak hadir tidak perlu diclosing.`;
     box.innerHTML = `
       ${renderClosingDeadlineSettingsCard()}
       <div style="background:linear-gradient(145deg,var(--bg3),var(--bg2));border:1px solid ${closing?'rgba(255,196,107,.24)':'rgba(91,143,255,.18)'};border-radius:18px;padding:14px;box-shadow:0 10px 28px rgba(0,0,0,.14);position:relative;overflow:hidden">
