@@ -2019,7 +2019,11 @@
     const attUsers = new Set(getVisibleAttendance().filter(a => extractDateKey(a) === d).map(a => sanitizeUsername(a.user)).filter(Boolean));
     const users = realActiveUsers().filter(u => normalizeRole(u.role || 'staff') !== 'admin').map(u => ({ ...u, username: sanitizeUsername(u.username || u.id) })).filter(u => u.username);
     const active = users.map(u => u.username);
-    const rewarded = users.filter(u => !isDailyRole(u.role || 'staff') && attUsers.has(u.username)).map(u => u.username);
+    const hasRismaTx = hasRismaTransactionOnDate(d);
+    const rewarded = users.filter(u => {
+      if (u.username === 'risma') return hasRismaTx;
+      return !isDailyRole(u.role || 'staff') && attUsers.has(u.username);
+    }).map(u => u.username);
     const byUser = new Map(users.map(u => [u.username, u]));
     return { activeUsers: active, rewardedUsers: rewarded, users: rewarded.map(u => byUser.get(u)).filter(Boolean) };
   }
@@ -2292,13 +2296,13 @@
     const summary = serverDailyTargetSummary();
     const targetRaw = prompt('Target omzet hari ini', formatRupiah(summary.targetAmount));
     if (targetRaw === null) return;
-    const bonusRaw = prompt('Bonus target per staff absen', formatRupiah(summary.bonusAmount));
+    const bonusRaw = prompt('Bonus target per staff hadir', formatRupiah(summary.bonusAmount));
     if (bonusRaw === null) return;
     const targetAmount = parseTargetMoney(targetRaw);
     const bonusAmount = parseTargetMoney(bonusRaw);
     if (targetAmount <= 0) return showToast('Target harus lebih dari 0', true);
     if (bonusAmount < 0) return showToast('Bonus tidak boleh minus', true);
-    const pin = await askPin(`Simpan target hari ini?\nTarget: Rp ${formatRupiah(targetAmount)}\nBonus staff absen: Rp ${formatRupiah(bonusAmount)}\n\nMasukkan PIN admin:`);
+    const pin = await askPin(`Simpan target hari ini?\nTarget: Rp ${formatRupiah(targetAmount)}\nBonus staff hadir: Rp ${formatRupiah(bonusAmount)}\n\nMasukkan PIN admin:`);
     if (!pin) return;
     if (!(await requireCurrentAdminPin(pin))) return;
     setLoading(true);
