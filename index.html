@@ -238,6 +238,17 @@
     .receipt-preview-box{background:var(--surface);border:1px solid var(--border);border-radius:13px;padding:12px;margin-top:10px;max-height:50vh;overflow:auto}
     .receipt-preview-text{font-family:'Courier New',monospace;font-size:11px;line-height:1.45;white-space:pre-wrap;color:var(--text);margin:0}
     .receipt-modal-actions{display:grid;grid-template-columns:1fr 1fr;gap:9px;margin-top:12px}
+    .modal-product-entry{display:grid;grid-template-columns:minmax(0,1fr) auto;gap:7px;align-items:center}
+    .modal-product-entry .g-input{min-height:38px!important}
+    .modal-product-entry .btn{min-height:38px!important;padding:8px 10px!important;font-size:12px!important;white-space:nowrap}
+    .modal-product-list{display:grid;gap:6px;max-height:118px;overflow:auto}
+    .modal-product-row{display:grid;grid-template-columns:20px minmax(0,1fr) auto;gap:7px;align-items:center;border:1px solid var(--border);background:var(--bg2);border-radius:11px;padding:7px 8px}
+    .modal-product-no{font-size:11px;font-weight:900;color:var(--accent)}
+    .modal-product-name{font-size:12px;font-weight:800;line-height:1.25;overflow-wrap:anywhere;min-width:0;color:var(--text)}
+    .modal-product-remove{border:0;border-radius:9px;background:var(--red-dim);color:var(--red);font-size:10.5px;font-weight:900;padding:6px 8px}
+    .modal-product-empty{border:1px dashed var(--border);background:var(--surface);color:var(--text-soft);border-radius:11px;padding:8px 9px;font-size:11px;line-height:1.35}
+    .trx-product-list{margin:0;padding-left:17px;display:grid;gap:2px}
+    .trx-product-list li{overflow-wrap:anywhere}
 
 
     /* PATCH UI COMPACT + MODERN FONT - SUPA */
@@ -438,9 +449,15 @@
           <p class="label-xs">User Transaksi</p>
           <select id="modal-pos-user" class="g-input" style="background:none;border:none;padding:4px 0 2px;font-size:15px;line-height:1.45;min-height:34px;display:block;width:100%"></select>
         </div>
-        <div style="background:var(--surface);border:1px solid var(--border);border-radius:13px;padding:14px 15px">
-          <p class="label-xs">Catatan</p>
-          <input id="modal-pos-note" type="text" placeholder="Tulis manual..." autocomplete="off" class="g-input" style="background:none;border:none;padding:4px 0 2px;font-size:15px;line-height:1.45;min-height:30px;display:block">
+        <div id="modal-pos-product-wrap" style="background:var(--surface);border:1px solid var(--border);border-radius:13px;padding:14px 15px">
+          <p class="label-xs">Rincian Barang</p>
+          <input id="modal-pos-note" type="hidden">
+          <div class="modal-product-entry">
+            <input id="modal-pos-item" type="text" placeholder="Nama barang..." autocomplete="off" class="g-input" oninput="updateModalTransactionItemButton()" onkeydown="handleModalTransactionItemKey(event)">
+            <button id="modal-pos-item-add" type="button" class="btn btn-primary" onclick="addModalTransactionItem()" disabled>+ Tambah Barang</button>
+          </div>
+          <p class="label-xs" style="margin-top:8px;margin-bottom:5px">Daftar Barang</p>
+          <div id="modal-pos-item-list" class="modal-product-list"></div>
         </div>
         <div style="background:var(--surface);border:1px solid var(--border);border-radius:13px;padding:14px 15px">
           <p class="label-xs">Nominal</p>
@@ -4200,7 +4217,7 @@ ${lockedByGlobal ? 'Hanya user ini yang dibuka dari closing global. Bonus closin
     const s = normalizeReceiptTextSettings(settings);
     const header = [s.storeName, ...String(s.storeSubtext || '').split(/\n/).filter(Boolean)].join('\n');
     const footer = String(s.footerText || DEFAULT_RECEIPT_TEXT_SETTINGS.footerText).split(/\n/).filter(Boolean).join('\n');
-    return `${header}\n----------------------------------------\n${receiptPreviewLabel(s.dateLabel)} 03/05/2026 21:30\n${receiptPreviewLabel(s.cashierLabel)} Rocky\n${receiptPreviewLabel(s.productLabel)} Pasmina Ceruty\n${receiptPreviewLabel(s.totalLabel)} Rp 125.000\n----------------------------------------\n${footer}\n${'\n'.repeat(s.bottomFeedLines)}`;
+    return `${header}\n----------------------------------------\n${receiptPreviewLabel(s.dateLabel)} 03/05/2026 21:30\n${receiptPreviewLabel(s.cashierLabel)} Rocky\n${s.productLabel}:\n1. Hijab Paris\n2. Pasmina\n\nJumlah item: 2\nTotal Bayar: Rp 125.000\n----------------------------------------\n${footer}\n${'\n'.repeat(s.bottomFeedLines)}`;
   }
 
   function renderReceiptTextSettingsBody() {
@@ -4332,6 +4349,121 @@ ${lockedByGlobal ? 'Hanya user ini yang dibuka dari closing global. Bonus closin
     });
   }
 
+  let modalTransactionItems = [];
+  function transactionProductItemsFromText(text, fallback = 'Transaksi') {
+    const rows = String(text || '').split(/\r?\n/).map(x => String(x || '').replace(/\s+/g, ' ').trim()).filter(Boolean);
+    return rows.length ? rows : [fallback];
+  }
+  function transactionProductTextFromItems(items, fallback = 'Transaksi') {
+    const rows = (Array.isArray(items) ? items : []).map(x => String(x || '').replace(/\s+/g, ' ').trim()).filter(Boolean);
+    return rows.length ? rows.join('\n') : fallback;
+  }
+  function getModalTransactionProductText() {
+    return transactionProductTextFromItems(modalTransactionItems, 'Transaksi');
+  }
+  function renderModalTransactionItems() {
+    const input = $('modal-pos-item');
+    const add = $('modal-pos-item-add');
+    const list = $('modal-pos-item-list');
+    const hidden = $('modal-pos-note');
+    if (add) add.disabled = !String(input?.value || '').trim();
+    if (hidden) hidden.value = getModalTransactionProductText();
+    if (!list) return;
+    if (!modalTransactionItems.length) {
+      list.innerHTML = '<div class="modal-product-empty">Belum ada barang. Jika kosong, tersimpan sebagai Transaksi.</div>';
+      return;
+    }
+    list.innerHTML = modalTransactionItems.map((item, index) => `
+      <div class="modal-product-row">
+        <span class="modal-product-no">${index + 1}</span>
+        <span class="modal-product-name">${escapeHtml(item)}</span>
+        <button type="button" class="modal-product-remove" onclick="removeModalTransactionItem(${index})">Hapus</button>
+      </div>`).join('');
+  }
+  function resetModalTransactionItems(note = '') {
+    const text = String(note || '').trim();
+    modalTransactionItems = text && text !== 'Transaksi' ? transactionProductItemsFromText(text, 'Transaksi') : [];
+    renderModalTransactionItems();
+  }
+  function updateModalTransactionItemButton() { renderModalTransactionItems(); }
+  function addModalTransactionItem() {
+    const input = $('modal-pos-item');
+    const value = String(input?.value || '').replace(/\s+/g, ' ').trim();
+    if (!value) { renderModalTransactionItems(); input?.focus?.(); return; }
+    modalTransactionItems.push(value);
+    if (input) input.value = '';
+    renderModalTransactionItems();
+    setTimeout(() => input?.focus?.(), 0);
+  }
+  function removeModalTransactionItem(index) {
+    const i = Number(index);
+    if (Number.isInteger(i) && i >= 0 && i < modalTransactionItems.length) modalTransactionItems.splice(i, 1);
+    renderModalTransactionItems();
+    setTimeout(() => $('modal-pos-item')?.focus?.(), 0);
+  }
+  function handleModalTransactionItemKey(e) {
+    if (e?.key === 'Enter') {
+      e.preventDefault();
+      addModalTransactionItem();
+    }
+  }
+  function transactionProductListHtml(note) {
+    const items = transactionProductItemsFromText(note, 'Transaksi');
+    if (items.length === 1) return escapeHtml(items[0]);
+    return `<ol class="trx-product-list">${items.map(x => `<li>${escapeHtml(x)}</li>`).join('')}</ol>`;
+  }
+  function transactionProductDetailHtml(note) {
+    const items = transactionProductItemsFromText(note, 'Transaksi');
+    return `<ol class="trx-product-list">${items.map(x => `<li>${escapeHtml(x)}</li>`).join('')}</ol>`;
+  }
+  function transactionHistoryTimeLabel(t) {
+    const txMs = getRecordTimeMs(t);
+    return txMs ? dateToTimeInput(new Date(txMs)) : formatDateLabel(getTransactionDateKey(t));
+  }
+  function closeTransactionDetail() {
+    const old = $('transaction-detail-modal');
+    if (old) old.remove();
+  }
+  function openTransactionDetail(id) {
+    const t = (cachedTransactions || []).find(x => String(x.id) === String(id));
+    if (!t) return showToast('Transaksi tidak ditemukan', true);
+    const txName = t.name || t.user || '-';
+    const payLabel = getTransactionPaymentLabel(t);
+    const itemCount = transactionProductItemsFromText(t.note || 'Transaksi', 'Transaksi').length;
+    closeTransactionDetail();
+    const wrap = document.createElement('div');
+    wrap.id = 'transaction-detail-modal';
+    wrap.className = 'modal-wrap show';
+    wrap.style.zIndex = '430';
+    wrap.style.alignItems = 'center';
+    wrap.style.justifyContent = 'center';
+    wrap.innerHTML = `
+      <div class="modal-sheet" style="max-width:392px;border-radius:22px;padding:16px">
+        <div style="display:flex;align-items:center;justify-content:space-between;gap:10px;margin-bottom:12px">
+          <div style="min-width:0">
+            <h3 style="font-size:15px;font-weight:900;letter-spacing:-.02em">Detail Transaksi</h3>
+            <p style="font-size:10.5px;color:var(--text-soft);margin-top:3px">${escapeHtml(txName)} · ${transactionHistoryTimeLabel(t)} · ${itemCount} item</p>
+          </div>
+          <button onclick="closeTransactionDetail()" class="btn btn-glass" style="width:36px;height:36px;padding:0;border-radius:12px"><i class="fas fa-xmark"></i></button>
+        </div>
+        <div class="trx-card" style="box-shadow:none;margin-bottom:10px">
+          <div style="flex:1;min-width:0">
+            <p class="stat-label">Total Bayar</p>
+            <p class="trx-amount" style="font-size:20px">Rp ${formatRupiah(t.amount)}</p>
+            <p class="trx-time">${formatDateLabel(getTransactionDateKey(t))} · ${escapeHtml(payLabel)}</p>
+          </div>
+        </div>
+        <div class="trx-card" style="box-shadow:none;align-items:flex-start">
+          <div style="flex:1;min-width:0">
+            <p class="stat-label" style="margin-bottom:8px">Daftar Barang</p>
+            ${transactionProductDetailHtml(t.note || 'Transaksi')}
+          </div>
+        </div>
+      </div>`;
+    document.body.appendChild(wrap);
+    wrap.addEventListener('click', e => { if (e.target === wrap) closeTransactionDetail(); });
+  }
+
 
   let receiptPreviewText = '';
   let receiptPreviewTitle = 'Struk Transaksi';
@@ -4360,6 +4492,13 @@ ${lockedByGlobal ? 'Hanya user ini yang dibuka dari closing global. Bonus closin
     const cleanLabel = receiptCleanLine(label || '-', '-', 10).slice(0, 7).padEnd(7, ' ');
     return `${cleanLabel} : ${String(value ?? '').trim()}`;
   }
+  function receiptProductItems(note) {
+    return transactionProductItemsFromText(note, 'Transaksi').map(x => receiptCleanLine(x, '', 28)).filter(Boolean);
+  }
+  function receiptProductNumbered(note, indent = '') {
+    const items = receiptProductItems(note);
+    return items.map((item, index) => `${indent}${index + 1}. ${item}`).join('\n');
+  }
   function buildTransactionReceiptText(tx = {}) {
     const s = getReceiptTextSettingsSafe();
     const width = 32;
@@ -4370,9 +4509,12 @@ ${lockedByGlobal ? 'Hanya user ini yang dibuka dari closing global. Bonus closin
     lines.push(receiptLine(width));
     lines.push(receiptValueLine(s.dateLabel || 'Tanggal', receiptDateTime(getRecordTimeMs(tx))));
     lines.push(receiptValueLine(s.cashierLabel || 'Kasir', receiptCleanLine(tx.name || tx.user || currentUser?.name || '-', '-', 22)));
-    lines.push(receiptValueLine(s.productLabel || 'Produk', receiptCleanLine(tx.note || 'Transaksi', 'Transaksi', 22)));
+    lines.push(`${receiptCleanLine(s.productLabel || 'Produk', 'Produk', 12)}:`);
+    receiptProductItems(tx.note).forEach((item, index) => lines.push(`${index + 1}. ${item}`));
     lines.push(receiptValueLine('Bayar', getTransactionPaymentLabel(tx)));
-    lines.push(receiptValueLine(s.totalLabel || 'Total', 'Rp ' + formatRupiah(tx.amount || 0)));
+    lines.push('');
+    lines.push(`Jumlah item: ${receiptProductItems(tx.note).length}`);
+    lines.push('Total Bayar: Rp ' + formatRupiah(tx.amount || 0));
     lines.push(receiptLine(width));
     String(s.footerText || 'Terima kasih').split(/\r?\n/).map(x => receiptCleanLine(x, '', width)).filter(Boolean).forEach(x => lines.push(x));
     lines.push('');
@@ -4428,7 +4570,7 @@ ${lockedByGlobal ? 'Hanya user ini yang dibuka dari closing global. Bonus closin
     if ($('transaction-modal-save-btn')) $('transaction-modal-save-btn').innerText = 'Simpan';
     if ($('transaction-modal-print-btn')) $('transaction-modal-print-btn').style.display = 'inline-flex';
     if ($('transaction-modal-actions')) $('transaction-modal-actions').style.gridTemplateColumns = '1fr 1fr 1fr';
-    $('modal-pos-note').value = '';
+    resetModalTransactionItems('');
     $('modal-pos-amount').value = '';
     $('modal-pos-amount').setAttribute('data-numeric', '0');
     const statusBox = $('modal-pos-status');
@@ -4446,7 +4588,7 @@ ${lockedByGlobal ? 'Hanya user ini yang dibuka dari closing global. Bonus closin
     } else {
       statusBox.innerHTML = `<div style="display:flex;align-items:center;gap:9px;padding:11px 13px;background:var(--red-dim);border:1px solid rgba(255,107,107,0.2);border-radius:11px"><i class="fas fa-circle-xmark" style="color:var(--red);font-size:13px"></i><span style="font-size:12.5px;color:var(--red);font-weight:600">Absen dulu sebelum transaksi!</span></div>`;
     }
-    setTimeout(() => $('modal-pos-note').focus(), 100);
+    setTimeout(() => $('modal-pos-item')?.focus?.(), 100);
   }
   function closeTransactionModal() {
     closeTransactionPaymentModal(true);
@@ -4502,9 +4644,8 @@ ${lockedByGlobal ? 'Hanya user ini yang dibuka dari closing global. Bonus closin
     if ($('transaction-modal-save-btn')) $('transaction-modal-save-btn').innerText = 'Simpan Edit';
     if ($('transaction-modal-print-btn')) $('transaction-modal-print-btn').style.display = 'none';
     if ($('transaction-modal-actions')) $('transaction-modal-actions').style.gridTemplateColumns = '1fr 1fr';
-    const noteInput = $('modal-pos-note');
     const amountInput = $('modal-pos-amount');
-    if (noteInput) noteInput.value = String(trx.note || 'Transaksi');
+    resetModalTransactionItems(String(trx.note || 'Transaksi'));
     if (amountInput) {
       const amount = Number(trx.amount || 0);
       amountInput.setAttribute('data-numeric', String(amount));
@@ -4513,7 +4654,7 @@ ${lockedByGlobal ? 'Hanya user ini yang dibuka dari closing global. Bonus closin
     const statusBox = $('modal-pos-status');
     if (statusBox) statusBox.innerHTML = `<div style="display:flex;align-items:center;gap:9px;padding:11px 13px;background:var(--amber-dim);border:1px solid rgba(255,196,107,0.2);border-radius:11px"><i class="fas fa-pen-to-square" style="color:var(--amber);font-size:13px"></i><span style="font-size:12.5px;color:var(--amber);font-weight:600">Mode edit: ubah user, catatan, nominal, lalu pilih Cash atau QRIS / Transfer.</span></div>`;
     if (modal) { modal.classList.add('show'); modal.style.display = 'flex'; }
-    setTimeout(() => noteInput?.focus?.(), 100);
+    setTimeout(() => $('modal-pos-item')?.focus?.(), 100);
   }
 
   async function saveEditedTransaction() {
@@ -4523,7 +4664,7 @@ ${lockedByGlobal ? 'Hanya user ini yang dibuka dari closing global. Bonus closin
     if (!trx) return showToast('Transaksi tidak ditemukan!', true);
     if (trx.user !== currentUser.username && !isAdmin()) return showToast('Tidak bisa edit transaksi orang lain!', true);
     const amount = parseInt($('modal-pos-amount')?.getAttribute('data-numeric') || '0', 10);
-    const note = String($('modal-pos-note')?.value || '').trim() || 'Transaksi';
+    const note = getModalTransactionProductText();
     const selectedUser = getSelectedTransactionUser(trx.user || currentUser?.username || '');
     if (!selectedUser) return showToast('Pilih user transaksi!', true);
     if (!isAdmin() && sanitizeUsername(selectedUser.username) !== sanitizeUsername(currentUser?.username || '')) return showToast('Tidak bisa pilih user lain!', true);
@@ -4544,7 +4685,7 @@ ${lockedByGlobal ? 'Hanya user ini yang dibuka dari closing global. Bonus closin
   function prepareTransactionPaymentFromModal(printAfterSave = false) {
     if (isBusy) return;
     const amount = parseInt($('modal-pos-amount')?.getAttribute('data-numeric') || '0', 10);
-    const note = String($('modal-pos-note')?.value || '').trim() || 'Transaksi';
+    const note = getModalTransactionProductText();
     const selectedUser = getSelectedTransactionUser(currentUser?.username || '');
     if (!selectedUser) return showToast('Pilih user transaksi!', true);
     if (!isAdmin() && sanitizeUsername(selectedUser.username) !== sanitizeUsername(currentUser?.username || '')) return showToast('Tidak bisa pilih user lain!', true);
@@ -4572,7 +4713,7 @@ ${lockedByGlobal ? 'Hanya user ini yang dibuka dari closing global. Bonus closin
     if (isBusy) return;
     const draft = pendingTransactionPaymentDraft || {};
     const amount = Number(draft.amount || parseInt($('modal-pos-amount')?.getAttribute('data-numeric') || '0', 10));
-    const note = String(draft.note || $('modal-pos-note')?.value || '').trim() || 'Transaksi';
+    const note = String(draft.note || getModalTransactionProductText()).trim() || 'Transaksi';
     const targetUser = getSelectedTransactionUser(draft.username || currentUser?.username || '');
     const targetUsername = sanitizeUsername(draft.username || targetUser?.username || currentUser?.username || '');
     if (!targetUser || !targetUsername) return showToast('Pilih user transaksi!', true);
@@ -5255,7 +5396,13 @@ ${lockedByGlobal ? 'Hanya user ini yang dibuka dari closing global. Bonus closin
         <button onclick="setHistoryFilter('yearly')" class="tab-btn ${historyFilter==='yearly'?'active':''}">Tahun Ini</button>
       </div>
       <div style="display:flex;flex-direction:column;gap:7px" class="page-in s3">
-        ${visibleItems.map(t => `
+        ${visibleItems.map(t => {
+          const txId = escapeHtml(t.id);
+          const txName = escapeHtml(t.name || t.user || '-');
+          const txTime = transactionHistoryTimeLabel(t);
+          const itemCount = transactionProductItemsFromText(t.note || 'Transaksi', 'Transaksi').length;
+          const payLabel = getTransactionPaymentLabel(t);
+          return `
           <div class="trx-card">
             <div class="trx-icon"><i class="fas fa-arrow-trend-up"></i></div>
             <div style="flex:1;min-width:0">
@@ -5265,16 +5412,17 @@ ${lockedByGlobal ? 'Hanya user ini yang dibuka dari closing global. Bonus closin
                 ${getTransactionPaymentBadge(t)}
                 ${isAdmin() ? `<span class="user-chip"><i class="fas fa-user" style="font-size:10px"></i>${escapeHtml(t.name || t.user)}</span>` : ''}
               </div>
-              <p class="trx-note">${escapeHtml(t.note || 'Transaksi')}</p>
-              <p class="trx-time">${(() => { const ms = getRecordTimeMs(t); return ms ? dateToTimeInput(new Date(ms)) : formatDateLabel(getTransactionDateKey(t)); })()} · ${getTransactionPaymentLabel(t)}</p>
+              <div class="trx-note">${txName} · ${txTime} · ${itemCount} item · ${escapeHtml(payLabel)}</div>
+              <p class="trx-time">${formatDateLabel(getTransactionDateKey(t))}</p>
             </div>
             <div class="trx-actions-inline" style="flex-shrink:0">
-              <button onclick="printTransactionReceipt('${t.id}')" class="btn btn-success" title="Cetak"><i class="fas fa-print"></i></button>
-              <button onclick="openEditTransactionModal('${t.id}')" class="btn btn-glass" title="Edit"><i class="fas fa-pen"></i></button>
-              <button onclick="deleteTransaction('${t.id}')" class="btn btn-danger" title="Hapus"><i class="fas fa-trash-can"></i></button>
+              <button onclick="openTransactionDetail('${txId}')" class="btn btn-glass" title="Detail"><i class="fas fa-list"></i></button>
+              <button onclick="printTransactionReceipt('${txId}')" class="btn btn-success" title="Cetak"><i class="fas fa-print"></i></button>
+              <button onclick="openEditTransactionModal('${txId}')" class="btn btn-glass" title="Edit"><i class="fas fa-pen"></i></button>
+              <button onclick="deleteTransaction('${txId}')" class="btn btn-danger" title="Hapus"><i class="fas fa-trash-can"></i></button>
             </div>
           </div>
-        `).join('') || `<div style="text-align:center;padding:56px 0;color:var(--text-ghost)"><i class="fas fa-inbox" style="font-size:30px;margin-bottom:10px;display:block;opacity:0.5"></i><p style="font-size:12.5px">Tidak ada transaksi</p></div>`}
+        `}).join('') || `<div style="text-align:center;padding:56px 0;color:var(--text-ghost)"><i class="fas fa-inbox" style="font-size:30px;margin-bottom:10px;display:block;opacity:0.5"></i><p style="font-size:12.5px">Tidak ada transaksi</p></div>`}
       </div>
       ${hasMore ? `<button onclick="increaseHistoryDisplayLimit()" class="btn btn-glass page-in s4" style="width:100%;margin-top:12px;padding:11px 12px;font-size:12px">Muat ${Math.min(HISTORY_PAGE_STEP, filtered.length - visibleItems.length)} transaksi lagi</button>` : ''}
     `;
@@ -9419,6 +9567,12 @@ Masukkan PIN admin:`);
   window.openReceiptPreview = openReceiptPreview;
   window.closeReceiptPreview = closeReceiptPreview;
   window.nativePrintReceiptText = nativePrintReceiptText;
+  window.addModalTransactionItem = addModalTransactionItem;
+  window.removeModalTransactionItem = removeModalTransactionItem;
+  window.handleModalTransactionItemKey = handleModalTransactionItemKey;
+  window.updateModalTransactionItemButton = updateModalTransactionItemButton;
+  window.openTransactionDetail = openTransactionDetail;
+  window.closeTransactionDetail = closeTransactionDetail;
   window.printTransactionReceipt = printTransactionReceipt;
   window.deleteTransaction = deleteTransaction;
   window.restoreDeletedTransaction = restoreDeletedTransaction;
