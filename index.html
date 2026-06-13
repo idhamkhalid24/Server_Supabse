@@ -1659,9 +1659,12 @@
   function activeUsers(list = cachedUsers) {
     return sortUsers((list || []).filter(isUserActive));
   }
+  function isTruthyFlag(value) {
+    return value === true || value === 1 || String(value || '').toLowerCase() === 'true' || String(value || '') === '1';
+  }
   function isDummyUser(rec) {
     const value = String(rec?.accountType || rec?.mode || '').toLowerCase();
-    return !!rec && (rec.isDummy === true || rec.trialMode === true || rec.dummy === true || value === 'dummy' || value === 'trial');
+    return !!rec && (isTruthyFlag(rec.isDummy) || isTruthyFlag(rec.trialMode) || isTruthyFlag(rec.dummy) || value === 'dummy' || value === 'trial');
   }
   function getTrialFlags(user) {
     const dummy = isDummyUser(user);
@@ -1669,7 +1672,7 @@
   }
   function isTrialRecord(rec) {
     if (!rec) return false;
-    if (rec.isDummy === true || rec.trialMode === true || rec.excludeFromReports === true || String(rec.accountType || '').toLowerCase() === 'dummy') return true;
+    if (isTruthyFlag(rec.isDummy) || isTruthyFlag(rec.trialMode) || isTruthyFlag(rec.excludeFromReports) || String(rec.accountType || '').toLowerCase() === 'dummy') return true;
     const username = sanitizeUsername(rec.user || rec.username || rec.targetUsername || '');
     return !!username && isDummyUser(getUserByUsername(username));
   }
@@ -4734,6 +4737,7 @@ ${lockedByGlobal ? 'Hanya user ini yang dibuka dari closing global. Bonus closin
         const editUserRole = normalizeRole(targetUser.role || trx.userRole || trx.role || 'staff');
         const editBonusGroup = editUserRole === 'harian' ? 'harian' : 'staff';
         const editBonus = getUserBonusSnapshot(targetUser);
+        const editTrialFlags = getTrialFlags(targetUser);
         const patch = {
           user: targetUsername,
           name: targetUser.name || targetUsername,
@@ -4747,6 +4751,7 @@ ${lockedByGlobal ? 'Hanya user ini yang dibuka dari closing global. Bonus closin
           bonusPercent: editBonus.transactionBonusPercent,
           transactionBonusPercent: editBonus.transactionBonusPercent,
           closingBonusPerMinuteSnapshot: editBonus.closingBonusPerMinute,
+          ...editTrialFlags,
           paymentMethod: paymentInfo.method,
           paymentLabel: paymentInfo.label,
           paymentStatus: 'success',
