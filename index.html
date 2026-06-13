@@ -4221,7 +4221,7 @@ ${lockedByGlobal ? 'Hanya user ini yang dibuka dari closing global. Bonus closin
     const s = normalizeReceiptTextSettings(settings);
     const header = [s.storeName, ...String(s.storeSubtext || '').split(/\n/).filter(Boolean)].join('\n');
     const footer = String(s.footerText || DEFAULT_RECEIPT_TEXT_SETTINGS.footerText).split(/\n/).filter(Boolean).join('\n');
-    return `${header}\n----------------------------------------\n${receiptPreviewLabel(s.dateLabel)} 03/05/2026 21:30\n${receiptPreviewLabel(s.cashierLabel)} Rocky\n${s.productLabel}:\n1. Hijab Paris\n2. Pasmina\n\nJumlah item: 2\nTotal Bayar: Rp 125.000\n----------------------------------------\n${footer}\n${'\n'.repeat(s.bottomFeedLines)}`;
+    return `${header}\n----------------------------------------\n${receiptPreviewLabel(s.dateLabel)} 03/05/2026 21:30\n${receiptPreviewLabel(s.cashierLabel)} Rocky\n${s.productLabel}:\n1. Hijab Paris\n2. Pasmina\n\nJumlah item: 2\nTotal Bayar: Rp 125.000\n${receiptPreviewLabel('Bayar')} QRIS / Transfer\n----------------------------------------\n${footer}\n${'\n'.repeat(s.bottomFeedLines)}`;
   }
 
   function renderReceiptTextSettingsBody() {
@@ -4515,10 +4515,10 @@ ${lockedByGlobal ? 'Hanya user ini yang dibuka dari closing global. Bonus closin
     lines.push(receiptValueLine(s.cashierLabel || 'Kasir', receiptCleanLine(tx.name || tx.user || currentUser?.name || '-', '-', 22)));
     lines.push(`${receiptCleanLine(s.productLabel || 'Produk', 'Produk', 12)}:`);
     receiptProductItems(tx.note).forEach((item, index) => lines.push(`${index + 1}. ${item}`));
-    lines.push(receiptValueLine('Bayar', getTransactionPaymentLabel(tx)));
     lines.push('');
     lines.push(`Jumlah item: ${receiptProductItems(tx.note).length}`);
     lines.push('Total Bayar: Rp ' + formatRupiah(tx.amount || 0));
+    lines.push(receiptValueLine('Bayar', getTransactionPaymentLabel(tx)));
     lines.push(receiptLine(width));
     String(s.footerText || 'Terima kasih').split(/\r?\n/).map(x => receiptCleanLine(x, '', width)).filter(Boolean).forEach(x => lines.push(x));
     lines.push('');
