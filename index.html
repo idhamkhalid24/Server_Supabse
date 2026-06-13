@@ -1185,6 +1185,7 @@
     if (!isAdmin()) return false;
     if (!tx || isRecordDeleted(tx)) return false;
     if (tx.notifyAdmin === false || tx.notificationStatus === 'skip') return false;
+    if (isTrialRecord(tx)) return false;
     if (tx.restoredFromBackup === true || tx.source === 'restore_backup' || tx.restoreSource === 'backup') return false;
     if (tx.restoredAt || tx.restoredBy) return false;
     if (isAdminTransactionSource(tx)) return false;
