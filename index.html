@@ -4216,12 +4216,15 @@ ${lockedByGlobal ? 'Hanya user ini yang dibuka dari closing global. Bonus closin
     const s = receiptCleanLine(label, '-', 12);
     return `${s.length < width ? s.padEnd(width, ' ') : s} :`;
   }
+  function receiptPreviewSummaryLabel(label) {
+    return receiptPreviewLabel(label, 11);
+  }
 
   function buildReceiptSettingsPreview(settings = getReceiptTextSettings()) {
     const s = normalizeReceiptTextSettings(settings);
     const header = [s.storeName, ...String(s.storeSubtext || '').split(/\n/).filter(Boolean)].join('\n');
     const footer = String(s.footerText || DEFAULT_RECEIPT_TEXT_SETTINGS.footerText).split(/\n/).filter(Boolean).join('\n');
-    return `${header}\n----------------------------------------\n${receiptPreviewLabel(s.dateLabel)} 03/05/2026 21:30\n${receiptPreviewLabel(s.cashierLabel)} Rocky\n${s.productLabel}:\n1. Hijab Paris\n2. Pasmina\n\nJumlah item: 2\nTotal Bayar: Rp 125.000\n${receiptPreviewLabel('Bayar')} QRIS / Transfer\n----------------------------------------\n${footer}\n${'\n'.repeat(s.bottomFeedLines)}`;
+    return `${header}\n----------------------------------------\n${receiptPreviewLabel(s.dateLabel)} 03/05/2026 21:30\n${receiptPreviewLabel(s.cashierLabel)} Rocky\n${s.productLabel}:\n1. Hijab Paris\n2. Pasmina\n\n${receiptPreviewSummaryLabel('Total Bayar')} Rp 125.000\n${receiptPreviewSummaryLabel('Bayar')} QRIS / Transfer\n----------------------------------------\n${footer}\n${'\n'.repeat(s.bottomFeedLines)}`;
   }
 
   function renderReceiptTextSettingsBody() {
@@ -4499,6 +4502,10 @@ ${lockedByGlobal ? 'Hanya user ini yang dibuka dari closing global. Bonus closin
     const cleanLabel = receiptCleanLine(label || '-', '-', 10).slice(0, 7).padEnd(7, ' ');
     return `${cleanLabel} : ${String(value ?? '').trim()}`;
   }
+  function receiptSummaryValueLine(label = '', value = '') {
+    const cleanLabel = receiptCleanLine(label || '-', '-', 12).padEnd(11, ' ');
+    return `${cleanLabel} : ${String(value ?? '').trim()}`;
+  }
   function receiptProductItems(note) {
     return transactionProductItemsFromText(note, 'Transaksi').map(x => receiptCleanLine(x, '', 28)).filter(Boolean);
   }
@@ -4519,9 +4526,8 @@ ${lockedByGlobal ? 'Hanya user ini yang dibuka dari closing global. Bonus closin
     lines.push(`${receiptCleanLine(s.productLabel || 'Produk', 'Produk', 12)}:`);
     receiptProductItems(tx.note).forEach((item, index) => lines.push(`${index + 1}. ${item}`));
     lines.push('');
-    lines.push(`Jumlah item: ${receiptProductItems(tx.note).length}`);
-    lines.push('Total Bayar: Rp ' + formatRupiah(tx.amount || 0));
-    lines.push(receiptValueLine('Bayar', getTransactionPaymentLabel(tx)));
+    lines.push(receiptSummaryValueLine('Total Bayar', 'Rp ' + formatRupiah(tx.amount || 0)));
+    lines.push(receiptSummaryValueLine('Bayar', getTransactionPaymentLabel(tx)));
     lines.push(receiptLine(width));
     String(s.footerText || 'Terima kasih').split(/\r?\n/).map(x => receiptCleanLine(x, '', width)).filter(Boolean).forEach(x => lines.push(x));
     lines.push('');
