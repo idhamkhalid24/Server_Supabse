@@ -4363,7 +4363,10 @@ ${lockedByGlobal ? 'Hanya user ini yang dibuka dari closing global. Bonus closin
     return rows.length ? rows.join('\n') : fallback;
   }
   function getModalTransactionProductText() {
-    return transactionProductTextFromItems(modalTransactionItems, 'Transaksi');
+    const inputValue = String($('modal-pos-item')?.value || '').replace(/\s+/g, ' ').trim();
+    const rows = [...modalTransactionItems];
+    if (inputValue) rows.push(inputValue);
+    return transactionProductTextFromItems(rows, 'Transaksi');
   }
   function renderModalTransactionItems() {
     const input = $('modal-pos-item');
@@ -4374,7 +4377,7 @@ ${lockedByGlobal ? 'Hanya user ini yang dibuka dari closing global. Bonus closin
     if (hidden) hidden.value = getModalTransactionProductText();
     if (!list) return;
     if (!modalTransactionItems.length) {
-      list.innerHTML = '<div class="modal-product-empty">Belum ada barang. Jika kosong, tersimpan sebagai Transaksi.</div>';
+      list.innerHTML = '<div class="modal-product-empty">Ketik 1 barang boleh langsung Simpan/Cetak. Tombol tambah hanya untuk barang berikutnya.</div>';
       return;
     }
     list.innerHTML = modalTransactionItems.map((item, index) => `
