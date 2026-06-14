@@ -508,6 +508,7 @@ import { createClient as createSupabaseClient } from "https://cdn.jsdelivr.net/n
   let cachedReceiptTextSettings = { id: RECEIPT_TEXT_DOC_ID, ...DEFAULT_RECEIPT_TEXT_SETTINGS, updatedAtMs: 0, updatedBy: '', updatedByName: '' };
   let cachedRismaManualClosingConfig = { id: '__risma_manual_closing', enabled: true, allowedUsers: [], allowedNames: {} };
   let unsubTransactions = null, unsubAttendance = null, unsubUsers = null, unsubAuditLogs = null, unsubClosings = null, unsubBonusSettings = null, unsubManualBonuses = null, unsubUnlockRequests = null, unsubRismaManualClosing = null, unsubHeaderGuideNote = null, unsubReceiptTextSettings = null, rangeStartDate = null, rangeEndDate = null;
+  let cachedUserSelectHtml = '';
   let attendanceReady = false, isBusy = false, auditLogLimit = 10, recycleBinLimit = 20, recycleSearch = '', recycleUserFilter = 'all', historyDisplayLimit = 30, inactiveUserLimit = 30, adminMoreOpen = false;
   let attendancePageUserFilter = 'all', attendancePageDateFilter = toDateKey(nowDate()), attendancePageShowDeleted = false, attendancePageLimit = 30;
   let adminProCurrentPageKey = '';
@@ -1110,16 +1111,19 @@ import { createClient as createSupabaseClient } from "https://cdn.jsdelivr.net/n
     return sortUsers([...map.values()]);
   }
   function getTransactionUserOptionsHtml(selectedUsername = '') {
-    const selected = sanitizeUsername(selectedUsername || currentUser?.username || '');
-    let users = getTransactionSelectableUsers();
-    if (!users.length && currentUser) {
-      users = [{ ...currentUser, username: sanitizeUsername(currentUser.username), name: currentUser.name || currentUser.username, role: currentUser.role || 'staff' }];
+    if (!cachedUserSelectHtml) {
+      let users = getTransactionSelectableUsers();
+      if (!users.length && currentUser) {
+        users = [{ ...currentUser, username: sanitizeUsername(currentUser.username), name: currentUser.name || currentUser.username, role: currentUser.role || 'staff' }];
+      }
+      cachedUserSelectHtml = users.map(u => {
+        const username = sanitizeUsername(u.username || '');
+        const label = `${u.name || username} (@${username})`;
+        return `<option value="${escapeHtml(username)}">${escapeHtml(label)}</option>`;
+      }).join('');
     }
-    return users.map(u => {
-      const username = sanitizeUsername(u.username || '');
-      const label = `${u.name || username} (@${username})`;
-      return `<option value="${escapeHtml(username)}" ${selected === username ? 'selected' : ''}>${escapeHtml(label)}</option>`;
-    }).join('');
+    const selected = sanitizeUsername(selectedUsername || currentUser?.username || '');
+    return cachedUserSelectHtml.replace(`value="${selected}"`, `value="${selected}" selected`);
   }
   function setTransactionUserSelect(selectedUsername = '') {
     const select = $('modal-pos-user');
@@ -3668,6 +3672,7 @@ ${lockedByGlobal ? 'Hanya user ini yang dibuka dari closing global. Bonus closin
     const uq = query(collection(db, 'users'), orderBy('name'));
     unsubUsers = onSnapshot(uq, (snap) => {
       cachedUsers = snap.docs.map(d => ({ id: d.id, ...d.data() }));
+      cachedUserSelectHtml = ''; // Reset cache saat data user berubah
       serverScheduleDailyTargetCheck();
       refreshCurrentPage();
     }, (err) => console.error(err));
