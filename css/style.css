@@ -446,6 +446,9 @@
     #transaction-modal .modal-sheet.modal-sheet-wide {
       max-width: min(480px, calc(100vw - 24px)) !important;
       padding: 18px !important;
+      contain: content; /* Optimasi rendering mesin browser */
+      will-change: transform;
+      transform: translateZ(0); /* Hardware acceleration */
     }
 
     #transaction-modal.modal-wrap.keyboard-safe {
