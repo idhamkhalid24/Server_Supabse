@@ -251,13 +251,16 @@
     .modal-product-entry .g-input{min-height:38px!important}
     .modal-product-entry .btn{min-height:38px!important;padding:8px 10px!important;font-size:12px!important;white-space:nowrap}
     .modal-product-list{display:grid;gap:6px;max-height:118px;overflow:auto}
-    .modal-product-row{display:grid;grid-template-columns:20px minmax(0,1fr) auto;gap:7px;align-items:center;border:1px solid var(--border);background:var(--bg2);border-radius:11px;padding:7px 8px}
+    .modal-product-row{display:grid;grid-template-columns:18px minmax(0,1fr) auto;gap:7px;align-items:center;border:1px solid var(--border);background:var(--bg2);border-radius:11px;padding:7px 8px}
     .modal-product-no{font-size:11px;font-weight:900;color:var(--accent)}
     .modal-product-name{font-size:12px;font-weight:800;line-height:1.25;overflow-wrap:anywhere;min-width:0;color:var(--text)}
     .modal-product-remove{border:0;border-radius:9px;background:var(--red-dim);color:var(--red);font-size:10.5px;font-weight:900;padding:6px 8px}
     .modal-product-empty{border:1px dashed var(--border);background:var(--surface);color:var(--text-soft);border-radius:11px;padding:8px 9px;font-size:11px;line-height:1.35}
     .trx-product-list{margin:0;padding-left:17px;display:grid;gap:2px}
     .trx-product-list li{overflow-wrap:anywhere}
+    .trx-product-receipt-list{font-family:'Courier New',monospace;font-size:12px;line-height:1.45;display:grid;gap:0;white-space:pre-wrap;color:var(--text);width:100%}
+    .trx-product-receipt-row{font-weight:800;overflow-wrap:anywhere}
+    .trx-product-receipt-sep{color:var(--text-ghost);white-space:nowrap;overflow:hidden}
 
 
     /* PATCH UI COMPACT + MODERN FONT - SUPA */
@@ -1522,9 +1525,13 @@ import { createClient as createSupabaseClient } from "https://cdn.jsdelivr.net/n
     if (!rec) return;
     const user = sanitizeUsername(rec.user);
     const dateKey = extractDateKey(rec) || rec.dateKey || toDateKey(nowDate());
+    const recId = rec.id ? String(rec.id) : '';
     cachedAttendance = sortByCreatedDesc([
       { ...rec, user, dateKey },
-      ...cachedAttendance.filter(a => !(sanitizeUsername(a.user) === user && extractDateKey(a) === dateKey))
+      ...cachedAttendance.filter(a => {
+        if (recId && String(a.id) === recId) return false;
+        return !(sanitizeUsername(a.user) === user && extractDateKey(a) === dateKey);
+      })
     ]);
   }
 
@@ -4252,9 +4259,11 @@ ${lockedByGlobal ? 'Hanya user ini yang dibuka dari closing global. Bonus closin
 
   function buildReceiptSettingsPreview(settings = getReceiptTextSettings()) {
     const s = normalizeReceiptTextSettings(settings);
+    const width = 32;
+    const separator = receiptLine(width);
     const header = [s.storeName, ...String(s.storeSubtext || '').split(/\n/).filter(Boolean)].join('\n');
     const footer = String(s.footerText || DEFAULT_RECEIPT_TEXT_SETTINGS.footerText).split(/\n/).filter(Boolean).join('\n');
-    return `${header}\n----------------------------------------\n${receiptPreviewLabel(s.dateLabel)} 03/05/2026 21:30\n${receiptPreviewLabel(s.cashierLabel)} Rocky\n${s.productLabel}:\n---Hijab Paris\n----------------------------------------\n---Pasmina\n----------------------------------------\n\n${receiptPreviewSummaryLabel('Total Bayar')} Rp 125.000\n${receiptPreviewSummaryLabel('Bayar')} QRIS / Transfer\n----------------------------------------\n${footer}\n${'\n'.repeat(s.bottomFeedLines)}`;
+    return `${header}\n${separator}\n${receiptPreviewLabel(s.dateLabel)} 03/05/2026 21:30\n${receiptPreviewLabel(s.cashierLabel)} Rocky\n${s.productLabel}:\n> Hijab Paris\n${separator}\n> Pasmina\n${separator}\n> Brego\n${separator}\n\n${receiptPreviewSummaryLabel('Total Bayar')} Rp 125.000\n${receiptPreviewSummaryLabel('Bayar')} QRIS / Transfer\n${separator}\n${footer}\n${'\n'.repeat(s.bottomFeedLines)}`;
   }
 
   function renderReceiptTextSettingsBody() {
@@ -4415,7 +4424,7 @@ ${lockedByGlobal ? 'Hanya user ini yang dibuka dari closing global. Bonus closin
     }
     list.innerHTML = modalTransactionItems.map((item, index) => `
       <div class="modal-product-row">
-        <span class="modal-product-no">${index + 1}</span>
+        <span class="modal-product-no">&gt;</span>
         <span class="modal-product-name">${escapeHtml(item)}</span>
         <button type="button" class="modal-product-remove" onclick="removeModalTransactionItem(${index})">Hapus</button>
       </div>`).join('');
@@ -4448,13 +4457,14 @@ ${lockedByGlobal ? 'Hanya user ini yang dibuka dari closing global. Bonus closin
     }
   }
   function transactionProductListHtml(note) {
-    const items = transactionProductItemsFromText(note, 'Transaksi');
-    if (items.length === 1) return escapeHtml(items[0]);
-    return `<ol class="trx-product-list">${items.map(x => `<li>${escapeHtml(x)}</li>`).join('')}</ol>`;
+    return transactionProductReceiptHtml(note);
   }
   function transactionProductDetailHtml(note) {
+    return transactionProductReceiptHtml(note);
+  }
+  function transactionProductReceiptHtml(note) {
     const items = transactionProductItemsFromText(note, 'Transaksi');
-    return `<ol class="trx-product-list">${items.map(x => `<li>${escapeHtml(x)}</li>`).join('')}</ol>`;
+    return `<div class="trx-product-receipt-list">${items.map(item => `<div class="trx-product-receipt-row">${escapeHtml('> ' + item)}</div><div class="trx-product-receipt-sep">${receiptLine(32)}</div>`).join('')}</div>`;
   }
   function transactionHistoryTimeLabel(t) {
     const txMs = getRecordTimeMs(t);
@@ -4539,9 +4549,9 @@ ${lockedByGlobal ? 'Hanya user ini yang dibuka dari closing global. Bonus closin
   function receiptProductItems(note) {
     return transactionProductItemsFromText(note, 'Transaksi').map(x => receiptCleanLine(x, '', 28)).filter(Boolean);
   }
-  function receiptProductNumbered(note, indent = '') {
+  function receiptProductMarkedLines(note, indent = '') {
     const items = receiptProductItems(note);
-    return items.map(item => `${indent}---${item}\n${indent}${receiptLine(32)}`).join('\n');
+    return items.flatMap(item => [`${indent}> ${item}`, `${indent}${receiptLine(32)}`]);
   }
   function buildTransactionReceiptText(tx = {}) {
     const s = getReceiptTextSettingsSafe();
@@ -4554,10 +4564,7 @@ ${lockedByGlobal ? 'Hanya user ini yang dibuka dari closing global. Bonus closin
     lines.push(receiptValueLine(s.dateLabel || 'Tanggal', receiptDateTime(getRecordTimeMs(tx))));
     lines.push(receiptValueLine(s.cashierLabel || 'Kasir', receiptCleanLine(tx.name || tx.user || currentUser?.name || '-', '-', 22)));
     lines.push(`${receiptCleanLine(s.productLabel || 'Produk', 'Produk', 12)}:`);
-    receiptProductItems(tx.note).forEach((item) => {
-      lines.push(`---${item}`);
-      lines.push(receiptLine(width));
-    });
+    lines.push(...receiptProductMarkedLines(tx.note));
     lines.push('');
     lines.push(receiptSummaryValueLine('Total Bayar', 'Rp ' + formatRupiah(tx.amount || 0)));
     lines.push(receiptSummaryValueLine('Bayar', getTransactionPaymentLabel(tx)));
@@ -9104,21 +9111,47 @@ Masukkan PIN admin:`);
       </div>`;
     document.body.appendChild(wrap);
     const sheet = wrap.querySelector('.modal-sheet');
-    const userSelect = wrap.querySelector('#admin-att-user');
-    const blockBackdropClose = () => {
+    const modalControls = wrap.querySelectorAll('#admin-att-user,#admin-att-date,#admin-att-time');
+    let backdropPointerStarted = false;
+    let controlInteractionActive = false;
+    const blockBackdropClose = (holdMs = 1400) => {
       wrap.__blockBackdropClose = true;
       clearTimeout(wrap.__blockBackdropTimer);
-      wrap.__blockBackdropTimer = setTimeout(() => { wrap.__blockBackdropClose = false; }, 900);
+      wrap.__blockBackdropTimer = setTimeout(() => { wrap.__blockBackdropClose = false; }, holdMs);
+    };
+    const beginControlInteraction = () => {
+      controlInteractionActive = true;
+      blockBackdropClose(30000);
+      clearTimeout(wrap.__controlInteractionTimer);
+      wrap.__controlInteractionTimer = setTimeout(() => { controlInteractionActive = false; }, 30000);
+    };
+    const endControlInteraction = () => {
+      blockBackdropClose(1400);
+      clearTimeout(wrap.__controlInteractionTimer);
+      wrap.__controlInteractionTimer = setTimeout(() => { controlInteractionActive = false; }, 1400);
+    };
+    const modalHasActiveControl = () => {
+      const active = document.activeElement;
+      return !!(active && wrap.contains(active) && active.matches && active.matches('input,select,textarea'));
     };
     if (sheet) {
-      ['click','pointerdown','touchstart','touchend'].forEach(evt => sheet.addEventListener(evt, (ev) => ev.stopPropagation(), { passive: true }));
+      ['click','pointerdown','touchstart','touchend','mousedown','mouseup'].forEach(evt => sheet.addEventListener(evt, (ev) => ev.stopPropagation(), { passive: true }));
     }
-    if (userSelect) {
-      ['pointerdown','touchstart','mousedown','focus','click','change'].forEach(evt => userSelect.addEventListener(evt, blockBackdropClose));
-    }
+    wrap.addEventListener('pointerdown', (e) => { backdropPointerStarted = e.target === wrap; }, true);
+    wrap.addEventListener('touchstart', (e) => { backdropPointerStarted = e.target === wrap; }, true);
+    wrap.addEventListener('mousedown', (e) => { backdropPointerStarted = e.target === wrap; }, true);
+    modalControls.forEach(control => {
+      ['pointerdown','touchstart','mousedown','focus','click'].forEach(evt => control.addEventListener(evt, beginControlInteraction));
+      ['input','change','blur','keydown'].forEach(evt => control.addEventListener(evt, endControlInteraction));
+    });
     wrap.addEventListener('click', (e) => {
       if (e.target !== wrap) return;
+      if (!backdropPointerStarted) return;
       if (wrap.__blockBackdropClose) return;
+      if (controlInteractionActive || modalHasActiveControl()) {
+        blockBackdropClose();
+        return;
+      }
       closeAdminAttendanceModal();
     });
   }
