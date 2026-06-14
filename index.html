@@ -1038,7 +1038,7 @@ import { createClient as createSupabaseClient } from "https://cdn.jsdelivr.net/n
   let appPageHistoryStack = [], appBackNavigating = false;
   let selectedRestoreProFile = null;
   let cachedTransactions = [], cachedAttendance = [], cachedUsers = [], cachedAuditLogs = [], cachedClosings = [], cachedManualBonuses = [], cachedUnlockRequests = [];
-  let cachedDailyTarget = null, cachedTargetNotification = null, cachedTargetSettings = {}, serverTargetApplyTimer = 0, serverTargetApplying = false;
+  let cachedDailyTarget = null, cachedTargetNotification = null, cachedTargetSettings = {}, cachedTargetSettingRows = [], serverTargetApplyTimer = 0, serverTargetApplying = false;
   let adminNotifBootstrapped = false;
   let adminNotifSeenIds = new Set();
   let cachedBonusSettings = { transactionBonusRate: 0.015, transactionBonusPercent: 1.5, closingBonusPerMinute: 100, closingDeadlineTime: '18:00', closingDeadlineHour: 18, closingDeadlineMinute: 0, closingDeadlineMinutes: 1080 };
@@ -1961,9 +1961,38 @@ import { createClient as createSupabaseClient } from "https://cdn.jsdelivr.net/n
   const SERVER_TARGET_REWARDS_TABLE = 'targetBonusRewards';
   const SERVER_TARGET_NOTIFICATIONS_TABLE = 'targetNotifications';
   function serverTargetDocId(dateKey = toDateKey(nowDate())) { return `daily_target_${String(dateKey || toDateKey(nowDate())).slice(0, 10)}`; }
+  function serverTargetSettingDocId(dateKey = toDateKey(nowDate())) { return `daily_target_${String(dateKey || toDateKey(nowDate())).slice(0, 10)}`; }
   function serverTargetBonusId(dateKey, username) { return `targetbonus_${String(dateKey || toDateKey(nowDate())).slice(0, 10)}_${sanitizeUsername(username)}`; }
   function serverTargetRewardId(dateKey, username) { return `targetreward_${String(dateKey || toDateKey(nowDate())).slice(0, 10)}_${sanitizeUsername(username)}`; }
   function serverTargetNotifId(dateKey = toDateKey(nowDate())) { return `targetnotif_${String(dateKey || toDateKey(nowDate())).slice(0, 10)}`; }
+  function serverNormalizeTargetDateKey(value, fallback = toDateKey(nowDate())) {
+    const raw = String(value || '').trim();
+    if (/^\d{4}-\d{2}-\d{2}$/.test(raw.slice(0, 10))) return raw.slice(0, 10);
+    let match = raw.match(/^(\d{1,2})$/);
+    if (match) {
+      const day = Number(match[1]);
+      if (day >= 1 && day <= 31) return `${toDateKey(nowDate()).slice(0, 7)}-${String(day).padStart(2, '0')}`;
+    }
+    match = raw.match(/^(\d{1,2})[/-](\d{1,2})$/);
+    if (match) {
+      const day = Number(match[1]), month = Number(match[2]);
+      if (day >= 1 && day <= 31 && month >= 1 && month <= 12) return `${toDateKey(nowDate()).slice(0, 4)}-${String(month).padStart(2, '0')}-${String(day).padStart(2, '0')}`;
+    }
+    return fallback;
+  }
+  function serverTargetSettingDate(row = {}) {
+    const idDate = String(row.id || '').match(/^daily_target_(\d{4}-\d{2}-\d{2})$/);
+    return serverNormalizeTargetDateKey(row.effectiveDate || row.dateKey || row.startDate || row.targetDate || (idDate ? idDate[1] : ''), '');
+  }
+  function serverIsDailyTargetSettingRow(row = {}) {
+    const id = String(row.id || '');
+    return id === 'daily_target'
+      || id === '__daily_target'
+      || id === 'default'
+      || id.startsWith('daily_target_')
+      || String(row.type || '') === 'daily_target_setting'
+      || String(row.targetSettingType || '') === 'daily_target';
+  }
   function isTargetAutoBonusRow(row = {}) {
     return String(row.source || '') === 'daily_target'
       || String(row.type || '') === 'daily_target_bonus'
@@ -2052,12 +2081,51 @@ import { createClient as createSupabaseClient } from "https://cdn.jsdelivr.net/n
     }
     return fallback;
   }
-  function serverTargetSettings() {
-    const data = cachedTargetSettings || {};
+  function serverNormalizeTargetSettings(data = {}, fallbackDate = toDateKey(nowDate())) {
+    const activeDate = serverTargetSettingDate(data) || serverNormalizeTargetDateKey(fallbackDate, toDateKey(nowDate()));
     return {
+      id: String(data.id || ''),
+      dateKey: activeDate,
+      effectiveDate: activeDate,
       targetAmount: serverTargetNumber(data, ['targetAmount','dailyTargetAmount','dailyOmzetTarget','omzetTarget'], SERVER_DAILY_TARGET_AMOUNT),
-      bonusAmount: serverTargetNumber(data, ['bonusAmount','bonusTargetAmount','dailyTargetBonusAmount','targetBonusAmount','BONUS_TARGET_AMOUNT'], SERVER_BONUS_TARGET_AMOUNT)
+      bonusAmount: serverTargetNumber(data, ['bonusAmount','bonusTargetAmount','dailyTargetBonusAmount','targetBonusAmount','BONUS_TARGET_AMOUNT'], SERVER_BONUS_TARGET_AMOUNT),
+      updatedAtMs: Number(data.updatedAtMs || 0)
     };
+  }
+  function serverPickTargetSettings(rows = [], dateKey = toDateKey(nowDate())) {
+    const targetDate = serverNormalizeTargetDateKey(dateKey, toDateKey(nowDate()));
+    let best = null, bestDate = '', bestUpdated = 0;
+    rows.filter(serverIsDailyTargetSettingRow).forEach((row) => {
+      const rowDate = serverTargetSettingDate(row);
+      if (rowDate && rowDate > targetDate) return;
+      const scoreDate = rowDate || '0000-00-00';
+      const updated = Number(row.updatedAtMs || 0);
+      if (!best || scoreDate > bestDate || (scoreDate === bestDate && updated >= bestUpdated)) {
+        best = row;
+        bestDate = scoreDate;
+        bestUpdated = updated;
+      }
+    });
+    return best ? serverNormalizeTargetSettings(best, targetDate) : null;
+  }
+  function serverTargetScheduleRows() {
+    const map = new Map();
+    (cachedTargetSettingRows || []).filter(serverIsDailyTargetSettingRow).forEach((row) => {
+      const normalized = serverNormalizeTargetSettings(row, serverTargetSettingDate(row) || toDateKey(nowDate()));
+      const dk = normalized.effectiveDate || normalized.dateKey;
+      if (!dk) return;
+      const old = map.get(dk);
+      if (!old || old.id === 'daily_target' || (normalized.id !== 'daily_target' && Number(normalized.updatedAtMs || 0) >= Number(old.updatedAtMs || 0))) map.set(dk, normalized);
+    });
+    return [...map.values()].sort((a, b) => String(b.effectiveDate || b.dateKey).localeCompare(String(a.effectiveDate || a.dateKey)));
+  }
+  function renderServerTargetScheduleList() {
+    const rows = serverTargetScheduleRows().slice(0, 12);
+    if (!rows.length) return `<div style="background:var(--surface);border:1px solid var(--border);border-radius:13px;padding:12px 13px"><p class="label-xs">Jadwal Target Tersimpan</p><p style="font-size:10.5px;color:var(--text-soft);margin-top:6px;line-height:1.35">Belum ada jadwal target bertanggal.</p></div>`;
+    return `<div style="background:var(--surface);border:1px solid var(--border);border-radius:13px;padding:12px 13px"><p class="label-xs">Jadwal Target Tersimpan</p><div style="display:grid;gap:7px;margin-top:8px">${rows.map((r) => { const dk = serverNormalizeTargetDateKey(r.effectiveDate || r.dateKey, ''); const rowId = String(r.id || serverTargetSettingDocId(dk)).replace(/[^a-zA-Z0-9_-]/g, ''); return `<div style="display:grid;grid-template-columns:minmax(72px,.85fr) minmax(0,1fr) minmax(0,1fr) auto;gap:7px;align-items:center;border:1px solid var(--border);border-radius:12px;padding:8px;background:var(--bg2)"><b style="font-size:11px;white-space:nowrap">${escapeHtml(formatDateLabel(dk))}</b><span style="font-size:10.5px;color:var(--text-soft);font-weight:800;white-space:nowrap;overflow:hidden;text-overflow:ellipsis">Target Rp ${formatRupiah(r.targetAmount)}</span><span style="font-size:10.5px;color:var(--text-soft);font-weight:800;white-space:nowrap;overflow:hidden;text-overflow:ellipsis">Bonus Rp ${formatRupiah(r.bonusAmount)}</span><button onclick="deleteServerTargetSchedule('${dk}','${rowId}')" class="btn btn-danger" title="Hapus target tanggal ini" style="width:34px;height:34px;min-height:34px;padding:0;border-radius:10px"><i class="fas fa-trash"></i></button></div>`; }).join('')}</div><p style="font-size:10.5px;color:var(--text-soft);margin-top:7px;line-height:1.35">Tanggal yang belum diset akan memakai target terakhir sebelumnya.</p></div>`;
+  }
+  function serverTargetSettings(dateKey = toDateKey(nowDate())) {
+    return serverNormalizeTargetSettings(cachedTargetSettings || {}, dateKey);
   }
   function serverTargetTransactions(dateKey = toDateKey(nowDate())) {
     const d = String(dateKey || toDateKey(nowDate())).slice(0, 10);
@@ -2066,11 +2134,11 @@ import { createClient as createSupabaseClient } from "https://cdn.jsdelivr.net/n
   }
   function serverDailyTargetSummary(dateKey = toDateKey(nowDate())) {
     const d = String(dateKey || toDateKey(nowDate())).slice(0, 10);
-    const settings = serverTargetSettings();
+    const settings = serverTargetSettings(d);
     const targetAmount = Math.max(1, Number(settings.targetAmount || SERVER_DAILY_TARGET_AMOUNT));
     const totalAmount = serverTargetTransactions(d).reduce((sum, t) => sum + Number(t.amount || 0), 0);
     const progressPercent = Number(((totalAmount / targetAmount) * 100).toFixed(2));
-    return { dateKey: d, targetAmount, totalAmount, progressPercent, reached: totalAmount >= targetAmount, remainingAmount: Math.max(0, targetAmount - totalAmount), bonusAmount: Number(settings.bonusAmount || 0) };
+    return { dateKey: d, targetSettingDate: settings.effectiveDate || settings.dateKey || d, targetAmount, totalAmount, progressPercent, reached: totalAmount >= targetAmount, remainingAmount: Math.max(0, targetAmount - totalAmount), bonusAmount: Number(settings.bonusAmount || 0) };
   }
   function serverTargetRewardPlan(dateKey = toDateKey(nowDate())) {
     const d = String(dateKey || toDateKey(nowDate())).slice(0, 10);
@@ -2085,13 +2153,31 @@ import { createClient as createSupabaseClient } from "https://cdn.jsdelivr.net/n
     const byUser = new Map(users.map(u => [u.username, u]));
     return { activeUsers: active, rewardedUsers: rewarded, users: rewarded.map(u => byUser.get(u)).filter(Boolean) };
   }
-  async function serverLoadTargetSettings() {
+  async function serverLoadTargetSettings(dateKey = toDateKey(nowDate())) {
+    const targetDate = serverNormalizeTargetDateKey(dateKey, toDateKey(nowDate()));
+    try {
+      const snap = await getDocsFromServer(query(collection(db, SERVER_TARGET_SETTINGS_TABLE), limit(1000)));
+      const rows = snap.docs.map((x) => ({ id: x.id, ...x.data() }));
+      cachedTargetSettingRows = rows.filter(serverIsDailyTargetSettingRow);
+      const picked = serverPickTargetSettings(rows, targetDate);
+      if (picked) {
+        cachedTargetSettings = picked;
+        return;
+      }
+    } catch (e) {
+      console.warn('jadwal target server belum terbaca', e?.code || e?.message || e);
+    }
     for (const id of ['daily_target','__daily_target','default']) {
       try {
         const snap = await getDocFromServer(doc(db, SERVER_TARGET_SETTINGS_TABLE, id));
         if (snap.exists()) {
-          cachedTargetSettings = snap.data() || {};
-          return;
+          const data = { id: snap.id, ...(snap.data() || {}) };
+          cachedTargetSettingRows = [...(cachedTargetSettingRows || []).filter((row) => String(row.id) !== String(data.id)), data];
+          const rowDate = serverTargetSettingDate(data);
+          if (!rowDate || rowDate <= targetDate) {
+            cachedTargetSettings = serverNormalizeTargetSettings(data, targetDate);
+            return;
+          }
         }
       } catch (_) {
         return;
@@ -2327,7 +2413,7 @@ import { createClient as createSupabaseClient } from "https://cdn.jsdelivr.net/n
           <div style="min-width:0">
             <p class="label-xs" style="margin:0 0 4px;font-size:9px;color:${reached ? 'var(--green)' : 'var(--accent)'}">${reached ? 'Target omzet harian tercapai' : 'Target omzet harian'}</p>
             <p style="font-family:var(--num-font);font-size:21px;font-weight:900;color:var(--text);line-height:1">Rp ${formatRupiah(summary.totalAmount)}</p>
-            <p style="font-size:10px;color:var(--text-soft);margin-top:5px;line-height:1.3">Target Rp ${formatRupiah(summary.targetAmount)} - Bonus Rp ${formatRupiah(summary.bonusAmount)} - ${reached ? 'status tercapai' : 'sisa Rp ' + formatRupiah(summary.remainingAmount)}</p>
+            <p style="font-size:10px;color:var(--text-soft);margin-top:5px;line-height:1.3">Target Rp ${formatRupiah(summary.targetAmount)} - Bonus Rp ${formatRupiah(summary.bonusAmount)} - Berlaku sejak ${formatDateLabel(summary.targetSettingDate)} - ${reached ? 'status tercapai' : 'sisa Rp ' + formatRupiah(summary.remainingAmount)}</p>
           </div>
           <span class="user-chip" style="font-size:10px;padding:3px 7px;color:${reached ? 'var(--green)' : 'var(--accent)'};background:${reached ? 'var(--green-dim)' : 'var(--accent-dim)'};white-space:nowrap">${unread ? 'Baru' : (reached ? 'Tercapai' : pctText + '%')}</span>
         </div>
@@ -2349,25 +2435,77 @@ import { createClient as createSupabaseClient } from "https://cdn.jsdelivr.net/n
       showToast('Gagal tandai notifikasi target.', true);
     }
   };
+  function parseServerTargetMoney(value) { return Number(String(value || '').replace(/[^0-9-]/g, '')) || 0; }
+  function closeServerDailyTargetSettingsModal() {
+    const old = document.getElementById('server-daily-target-settings-modal');
+    if (old) old.remove();
+  }
+  window.closeServerDailyTargetSettingsModal = closeServerDailyTargetSettingsModal;
   window.openServerDailyTargetSettings = async function() {
-    const parseTargetMoney = value => Number(String(value || '').replace(/[^0-9-]/g, '')) || 0;
+    await serverLoadTargetSettings().catch((e) => console.warn('refresh jadwal target server gagal', e?.code || e?.message || e));
     const summary = serverDailyTargetSummary();
-    const targetRaw = prompt('Target omzet hari ini', formatRupiah(summary.targetAmount));
-    if (targetRaw === null) return;
-    const bonusRaw = prompt('Bonus target per staff hadir', formatRupiah(summary.bonusAmount));
-    if (bonusRaw === null) return;
-    const targetAmount = parseTargetMoney(targetRaw);
-    const bonusAmount = parseTargetMoney(bonusRaw);
+    closeServerDailyTargetSettingsModal();
+    const wrap = document.createElement('div');
+    wrap.id = 'server-daily-target-settings-modal';
+    wrap.className = 'modal-wrap show';
+    wrap.style.zIndex = '430';
+    wrap.style.alignItems = 'center';
+    wrap.style.justifyContent = 'center';
+    wrap.innerHTML = `
+      <div class="modal-sheet" style="max-width:390px;border-radius:22px;padding:16px">
+        <div style="display:flex;align-items:center;justify-content:space-between;gap:10px;margin-bottom:12px">
+          <div style="min-width:0">
+            <h3 style="font-size:15px;font-weight:900;letter-spacing:-.02em">Atur Target Harian</h3>
+            <p style="font-size:10.5px;color:var(--text-soft);margin-top:3px">Bisa dijadwalkan untuk tanggal tertentu.</p>
+          </div>
+          <button onclick="closeServerDailyTargetSettingsModal()" class="btn btn-glass" style="width:36px;height:36px;padding:0;border-radius:12px"><i class="fas fa-xmark"></i></button>
+        </div>
+        <div style="display:grid;gap:10px">
+          <div style="background:var(--surface);border:1px solid var(--border);border-radius:13px;padding:12px 13px">
+            <p class="label-xs">Tanggal Berlaku</p>
+            <input id="serverTargetEffectiveDate" class="g-input" value="${escapeHtml(toDateKey(nowDate()))}" placeholder="Contoh: 21 atau ${escapeHtml(toDateKey(nowDate()))}" inputmode="numeric">
+            <p style="font-size:10.5px;color:var(--text-soft);margin-top:6px;line-height:1.35">Isi 21 untuk tanggal 21 bulan ini. Jika tanggal belum tiba, target hari ini tetap memakai setting terakhir.</p>
+          </div>
+          <div style="background:var(--surface);border:1px solid var(--border);border-radius:13px;padding:12px 13px">
+            <p class="label-xs">Target Omzet</p>
+            <input id="serverTargetAmountInput" class="g-input" value="${escapeHtml(formatRupiah(summary.targetAmount))}" inputmode="numeric" placeholder="Target omzet">
+          </div>
+          <div style="background:var(--surface);border:1px solid var(--border);border-radius:13px;padding:12px 13px">
+            <p class="label-xs">Bonus per Staff Hadir</p>
+            <input id="serverTargetBonusInput" class="g-input" value="${escapeHtml(formatRupiah(summary.bonusAmount))}" inputmode="numeric" placeholder="Bonus target">
+          </div>
+          ${renderServerTargetScheduleList()}
+        </div>
+        <div style="display:grid;grid-template-columns:1fr 1fr;gap:9px;margin-top:12px">
+          <button onclick="closeServerDailyTargetSettingsModal()" class="btn btn-glass" style="padding:11px;font-size:12px">Batal</button>
+          <button onclick="saveServerDailyTargetSettingsFromForm()" class="btn btn-primary" style="padding:11px;font-size:12px"><i class="fas fa-check"></i> Simpan</button>
+        </div>
+      </div>`;
+    document.body.appendChild(wrap);
+    wrap.addEventListener('click', e => { if (e.target === wrap) closeServerDailyTargetSettingsModal(); });
+    setTimeout(() => document.getElementById('serverTargetEffectiveDate')?.focus?.(), 80);
+  };
+  window.saveServerDailyTargetSettingsFromForm = async function() {
+    const effectiveRaw = document.getElementById('serverTargetEffectiveDate')?.value || toDateKey(nowDate());
+    const effectiveDate = serverNormalizeTargetDateKey(effectiveRaw, '');
+    if (!effectiveDate) return showToast('Tanggal target tidak valid', true);
+    const targetAmount = parseServerTargetMoney(document.getElementById('serverTargetAmountInput')?.value || '');
+    const bonusAmount = parseServerTargetMoney(document.getElementById('serverTargetBonusInput')?.value || '');
     if (targetAmount <= 0) return showToast('Target harus lebih dari 0', true);
     if (bonusAmount < 0) return showToast('Bonus tidak boleh minus', true);
-    const pin = await askPin(`Simpan target hari ini?\nTarget: Rp ${formatRupiah(targetAmount)}\nBonus staff hadir: Rp ${formatRupiah(bonusAmount)}\n\nMasukkan PIN admin:`);
+    const today = toDateKey(nowDate()), future = effectiveDate > today;
+    const pin = await askPin(`Simpan target untuk ${effectiveDate}?\nTarget: Rp ${formatRupiah(targetAmount)}\nBonus staff hadir: Rp ${formatRupiah(bonusAmount)}\n${future ? '\nTarget hari ini tetap memakai setting terakhir sampai tanggal itu tiba.' : ''}\n\nMasukkan PIN admin:`);
     if (!pin) return;
     if (!(await requireCurrentAdminPin(pin))) return;
     setLoading(true);
     try {
+      const scheduleId = serverTargetSettingDocId(effectiveDate);
       const payload = {
-        id: 'daily_target',
-        dateKey: toDateKey(nowDate()),
+        id: scheduleId,
+        type: 'daily_target_setting',
+        targetSettingType: 'daily_target',
+        dateKey: effectiveDate,
+        effectiveDate,
         targetAmount,
         bonusAmount,
         updatedAt: serverTimestamp(),
@@ -2375,15 +2513,68 @@ import { createClient as createSupabaseClient } from "https://cdn.jsdelivr.net/n
         updatedBy: currentUser?.username || 'admin',
         updatedByName: currentUser?.name || currentUser?.username || 'Admin'
       };
-      await setDoc(doc(db, SERVER_TARGET_SETTINGS_TABLE, 'daily_target'), payload, { merge: true });
-      cachedTargetSettings = payload;
+      await setDoc(doc(db, SERVER_TARGET_SETTINGS_TABLE, scheduleId), payload, { merge: true });
+      if (effectiveDate === today) await setDoc(doc(db, SERVER_TARGET_SETTINGS_TABLE, 'daily_target'), { ...payload, id: 'daily_target' }, { merge: true });
       cachedDailyTarget = null;
       await serverApplyDailyTarget();
       adminDashboardPanelsHash = '';
       renderAdminDashboardPanels();
-      showToast('Target dan bonus disimpan');
+      closeServerDailyTargetSettingsModal();
+      showToast(future ? `Target dijadwalkan untuk ${effectiveDate}` : 'Target dan bonus disimpan');
     } catch (e) {
       showToast('Gagal simpan target: ' + (e.code || e.message || 'cek koneksi'), true);
+    }
+    setLoading(false);
+  };
+  window.deleteServerTargetSchedule = async function(rawDate, rawId = '') {
+    const effectiveDate = serverNormalizeTargetDateKey(rawDate, '');
+    if (!effectiveDate) return showToast('Tanggal target tidak valid', true);
+    const scheduleId = serverTargetSettingDocId(effectiveDate);
+    const rowId = String(rawId || '').replace(/[^a-zA-Z0-9_-]/g, '');
+    const pin = await askPin(`Hapus target untuk ${effectiveDate}?\nTanggal ini akan kembali mengikuti target terakhir sebelumnya.\n\nMasukkan PIN admin:`);
+    if (!pin) return;
+    if (!(await requireCurrentAdminPin(pin))) return;
+    setLoading(true);
+    try {
+      const ids = new Set([scheduleId]);
+      if (rowId) ids.add(rowId);
+      try {
+        const snap = await getDocFromServer(doc(db, SERVER_TARGET_SETTINGS_TABLE, 'daily_target'));
+        if (snap?.exists()) {
+          const legacy = { id: 'daily_target', ...(snap.data() || {}) };
+          const legacyDate = serverTargetSettingDate(legacy);
+          if (rowId === 'daily_target' || legacyDate === effectiveDate || (!legacyDate && effectiveDate === toDateKey(nowDate()))) ids.add('daily_target');
+        }
+      } catch (_) {}
+      for (const id of ids) if (id) await deleteDoc(doc(db, SERVER_TARGET_SETTINGS_TABLE, id));
+      cachedTargetSettingRows = (cachedTargetSettingRows || []).filter((row) => !ids.has(String(row.id || '')));
+      cachedTargetSettings = {};
+      cachedDailyTarget = null;
+      await serverLoadTargetSettings();
+      const todayKey = toDateKey(nowDate());
+      const active = serverPickTargetSettings(cachedTargetSettingRows || [], todayKey);
+      if (active) {
+        const legacy = {
+          ...active,
+          id: 'daily_target',
+          updatedAt: serverTimestamp(),
+          updatedAtMs: Date.now(),
+          updatedBy: currentUser?.username || 'admin',
+          updatedByName: currentUser?.name || currentUser?.username || 'Admin'
+        };
+        await setDoc(doc(db, SERVER_TARGET_SETTINGS_TABLE, 'daily_target'), legacy, { merge: true });
+        cachedTargetSettings = active;
+      } else {
+        await deleteDoc(doc(db, SERVER_TARGET_SETTINGS_TABLE, 'daily_target')).catch(() => {});
+        cachedTargetSettings = {};
+      }
+      await serverApplyDailyTarget();
+      adminDashboardPanelsHash = '';
+      renderAdminDashboardPanels();
+      closeServerDailyTargetSettingsModal();
+      showToast(`Target tanggal ${effectiveDate} dihapus`);
+    } catch (e) {
+      showToast('Gagal hapus target: ' + (e.code || e.message || 'cek koneksi'), true);
     }
     setLoading(false);
   };
@@ -6744,7 +6935,7 @@ Masukkan PIN admin:`);
       dailyTargets: cachedDailyTarget ? [{ id: cachedDailyTarget.id || serverTargetDocId(cachedDailyTarget.dateKey), ...cachedDailyTarget }] : [],
       targetBonusRewards: [],
       targetNotifications: cachedTargetNotification ? [{ ...cachedTargetNotification }] : [],
-      targetSettings: cachedTargetSettings && Object.keys(cachedTargetSettings).length ? [{ id: 'daily_target', ...cachedTargetSettings }] : [],
+      targetSettings: (cachedTargetSettingRows || []).length ? cachedTargetSettingRows : (cachedTargetSettings && Object.keys(cachedTargetSettings).length ? [{ id: 'daily_target', ...cachedTargetSettings }] : []),
       adminDeviceTokens: [],
       auditLogs: cachedAuditLogs || []
     });
@@ -7409,6 +7600,7 @@ Masukkan PIN admin:`);
     cachedDailyTarget = null;
     cachedTargetNotification = null;
     cachedTargetSettings = {};
+    cachedTargetSettingRows = [];
     cachedRismaManualClosingConfig = { id: RISMA_MANUAL_CLOSING_DOC_ID, enabled: true, allowedUsers: [], allowedNames: {} };
     cachedHeaderGuideNote = { id: HEADER_GUIDE_NOTE_DOC_ID, note: DEFAULT_HEADER_GUIDE_NOTE, updatedAtMs: 0, updatedBy: '', updatedByName: '' };
       cachedStaffDailyHomeNote = { id: STAFF_DAILY_NOTE_DOC_ID, note: DEFAULT_STAFF_DAILY_NOTE, enabled: true, updatedAtMs: 0, updatedBy: '', updatedByName: '' };
@@ -8025,7 +8217,10 @@ Ketik PIN admin untuk lanjut:`);
       const dk = String(row.dateKey || row.date || '').slice(0, 10);
       return row.id || (dk ? serverTargetNotifId(dk) : `targetnotif_restore_${nowMs}_${index + 1}`);
     });
-    pushGenericRestoreRows(targetSettings, targetSettingRows, (row, index) => row.id || (index === 0 ? 'daily_target' : `target_setting_${index + 1}`));
+    pushGenericRestoreRows(targetSettings, targetSettingRows, (row, index) => {
+      const dk = serverNormalizeTargetDateKey(row.effectiveDate || row.dateKey || row.startDate || row.targetDate || '', '');
+      return row.id || (dk ? serverTargetSettingDocId(dk) : (index === 0 ? 'daily_target' : `target_setting_${index + 1}`));
+    });
     pushGenericRestoreRows(adminDeviceTokens, adminDeviceTokenRows, (row, index) => row.id || row.token || row.deviceId || `admin_token_restore_${nowMs}_${index + 1}`);
 
     for (const a of auditLogs.slice(0, AUDIT_SYNC_LIMIT)) {
@@ -8043,6 +8238,8 @@ Ketik PIN admin untuk lanjut:`);
     await bulkUpsertIfPresent(SERVER_TARGET_REWARDS_TABLE, targetBonusRewardRows, 500, 'reward target');
     await bulkUpsertIfPresent(SERVER_TARGET_NOTIFICATIONS_TABLE, targetNotificationRows, 500, 'notifikasi target');
     await bulkUpsertIfPresent(SERVER_TARGET_SETTINGS_TABLE, targetSettingRows, 500, 'setting target');
+    cachedTargetSettingRows = targetSettingRows.map(r => ({ id: r.id, ...(r.data || {}) }));
+    cachedTargetSettings = serverPickTargetSettings(cachedTargetSettingRows, toDateKey(nowDate())) || {};
     await bulkUpsertIfPresent('adminDeviceTokens', adminDeviceTokenRows, 500, 'token notifikasi');
     await bulkUpsertIfPresent('audit_logs', auditRows, 500, 'audit');
 
