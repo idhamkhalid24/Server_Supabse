@@ -4100,7 +4100,6 @@ ${lockedByGlobal ? 'Hanya user ini yang dibuka dari closing global. Bonus closin
     }
     list.innerHTML = modalTransactionItems.map((item, index) => `
       <div class="modal-product-row">
-        <span class="modal-product-no">&gt;</span>
         <span class="modal-product-name">${escapeHtml(item)}</span>
         <button type="button" class="modal-product-remove" onclick="removeModalTransactionItem(${index})">Hapus</button>
       </div>`).join('');
@@ -4140,7 +4139,7 @@ ${lockedByGlobal ? 'Hanya user ini yang dibuka dari closing global. Bonus closin
   }
   function transactionProductReceiptHtml(note) {
     const items = transactionProductItemsFromText(note, 'Transaksi');
-    return `<div class="trx-product-receipt-list">${items.map(item => `<div class="trx-product-receipt-row">${escapeHtml('> ' + item)}</div><div class="trx-product-receipt-sep">${receiptLine(32)}</div>`).join('')}</div>`;
+    return `<div class="trx-product-receipt-list">${items.map(item => `<div class="trx-product-receipt-row">${escapeHtml('> ' + item)}</div>`).join('')}</div>`;
   }
   function transactionHistoryTimeLabel(t) {
     const txMs = getRecordTimeMs(t);
