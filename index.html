@@ -4396,16 +4396,30 @@ ${lockedByGlobal ? 'Hanya user ini yang dibuka dari closing global. Bonus closin
   }
 
   let modalTransactionItems = [];
+  function normalizeTransactionProductName(value) {
+    return String(value || '').replace(/\s+/g, ' ').trim().toUpperCase();
+  }
+  function forceUppercaseInputValue(el) {
+    if (!el) return;
+    const oldValue = String(el.value || '');
+    const nextValue = oldValue.toUpperCase();
+    if (oldValue === nextValue) return;
+    const start = el.selectionStart, end = el.selectionEnd;
+    el.value = nextValue;
+    try {
+      if (typeof start === 'number' && typeof end === 'number') el.setSelectionRange(start, end);
+    } catch (_) {}
+  }
   function transactionProductItemsFromText(text, fallback = 'Transaksi') {
-    const rows = String(text || '').split(/\r?\n/).map(x => String(x || '').replace(/\s+/g, ' ').trim()).filter(Boolean);
+    const rows = String(text || '').split(/\r?\n/).map(normalizeTransactionProductName).filter(Boolean);
     return rows.length ? rows : [fallback];
   }
   function transactionProductTextFromItems(items, fallback = 'Transaksi') {
-    const rows = (Array.isArray(items) ? items : []).map(x => String(x || '').replace(/\s+/g, ' ').trim()).filter(Boolean);
+    const rows = (Array.isArray(items) ? items : []).map(normalizeTransactionProductName).filter(Boolean);
     return rows.length ? rows.join('\n') : fallback;
   }
   function getModalTransactionProductText() {
-    const inputValue = String($('modal-pos-item')?.value || '').replace(/\s+/g, ' ').trim();
+    const inputValue = normalizeTransactionProductName($('modal-pos-item')?.value || '');
     const rows = [...modalTransactionItems];
     if (inputValue) rows.push(inputValue);
     return transactionProductTextFromItems(rows, 'Transaksi');
@@ -4415,6 +4429,7 @@ ${lockedByGlobal ? 'Hanya user ini yang dibuka dari closing global. Bonus closin
     const add = $('modal-pos-item-add');
     const list = $('modal-pos-item-list');
     const hidden = $('modal-pos-note');
+    forceUppercaseInputValue(input);
     if (add) add.disabled = !String(input?.value || '').trim();
     if (hidden) hidden.value = getModalTransactionProductText();
     if (!list) return;
@@ -4437,7 +4452,7 @@ ${lockedByGlobal ? 'Hanya user ini yang dibuka dari closing global. Bonus closin
   function updateModalTransactionItemButton() { renderModalTransactionItems(); }
   function addModalTransactionItem() {
     const input = $('modal-pos-item');
-    const value = String(input?.value || '').replace(/\s+/g, ' ').trim();
+    const value = normalizeTransactionProductName(input?.value || '');
     if (!value) { renderModalTransactionItems(); input?.focus?.(); return; }
     modalTransactionItems.push(value);
     if (input) input.value = '';
@@ -4766,7 +4781,7 @@ ${lockedByGlobal ? 'Hanya user ini yang dibuka dari closing global. Bonus closin
     if (isBusy) return;
     const draft = pendingTransactionPaymentDraft || {};
     const amount = Number(draft.amount || parseInt($('modal-pos-amount')?.getAttribute('data-numeric') || '0', 10));
-    const note = String(draft.note || getModalTransactionProductText()).trim() || 'Transaksi';
+    const note = transactionProductTextFromItems(transactionProductItemsFromText(draft.note || getModalTransactionProductText(), 'Transaksi'), 'Transaksi');
     const targetUser = getSelectedTransactionUser(draft.username || currentUser?.username || '');
     const targetUsername = sanitizeUsername(draft.username || targetUser?.username || currentUser?.username || '');
     if (!targetUser || !targetUsername) return showToast('Pilih user transaksi!', true);
