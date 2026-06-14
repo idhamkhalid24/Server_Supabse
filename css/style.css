@@ -506,4 +506,258 @@
         padding: 15px !important;
       }
     }
-  
+
+/* ===== PATCH FINAL: Modal Transaksi Server dibuat seperti aplikasi kasir, lebih smooth ===== */
+#transaction-modal.server-tx-wrap,
+#transaction-payment-modal.server-payment-wrap{
+  background:rgba(15,23,42,.54)!important;
+  backdrop-filter:none!important;
+  -webkit-backdrop-filter:none!important;
+  align-items:center!important;
+  justify-content:center!important;
+  padding:14px!important;
+  contain:layout style!important;
+  overflow:auto!important;
+  overscroll-behavior:contain!important;
+}
+#transaction-modal.server-tx-wrap.show,
+#transaction-payment-modal.server-payment-wrap.show{display:flex!important}
+#transaction-modal .server-tx-sheet{
+  width:min(388px,calc(100vw - 28px))!important;
+  max-width:min(388px,calc(100vw - 28px))!important;
+  max-height:min(calc(100svh - 28px),620px)!important;
+  border:1.5px solid rgba(37,99,235,.35)!important;
+  border-radius:23px!important;
+  padding:10px!important;
+  overflow:auto!important;
+  box-shadow:0 24px 65px rgba(15,23,42,.34),0 0 0 1px rgba(255,255,255,.28)!important;
+  transform:translate3d(0,0,0)!important;
+  will-change:transform,opacity!important;
+}
+#transaction-modal .server-tx-sheet::before,
+#transaction-payment-modal .server-payment-sheet::before{
+  content:'';
+  display:block;
+  width:38px;
+  height:4px;
+  border-radius:999px;
+  background:var(--border);
+  margin:1px auto 9px;
+}
+#transaction-modal .server-tx-head,
+#transaction-payment-modal .server-payment-head{
+  align-items:center!important;
+  background:linear-gradient(135deg,#2563eb,#38bdf8)!important;
+  color:#fff!important;
+  margin:-2px -2px 10px!important;
+  padding:10px 11px!important;
+  border-radius:18px!important;
+  gap:8px!important;
+  box-shadow:0 10px 25px rgba(37,99,235,.22)!important;
+}
+#transaction-modal .server-tx-head h3,
+#transaction-payment-modal .server-payment-head h3{
+  color:#fff!important;
+  font-size:15px!important;
+  line-height:1.2!important;
+  font-weight:950!important;
+  letter-spacing:-.02em!important;
+}
+#transaction-payment-modal .server-payment-head p{color:rgba(255,255,255,.82)!important}
+#transaction-modal .server-tx-head .btn,
+#transaction-payment-modal .server-payment-head .btn{
+  background:rgba(255,255,255,.18)!important;
+  border-color:rgba(255,255,255,.28)!important;
+  color:#fff!important;
+  width:30px!important;
+  height:30px!important;
+  min-width:30px!important;
+  min-height:30px!important;
+  border-radius:11px!important;
+  padding:0!important;
+}
+#transaction-modal .server-tx-body{gap:8px!important}
+#transaction-modal .server-tx-field,
+#transaction-modal #modal-pos-user-wrap,
+#transaction-modal #modal-pos-product-wrap,
+#transaction-modal .server-tx-amount-card{
+  background:var(--surface)!important;
+  border:1px solid var(--border)!important;
+  border-radius:12px!important;
+  padding:10px!important;
+  overflow:hidden!important;
+}
+#transaction-modal .label-xs{
+  font-size:10px!important;
+  line-height:1.15!important;
+  letter-spacing:.06em!important;
+  font-weight:950!important;
+  margin-bottom:5px!important;
+}
+#transaction-modal #modal-pos-user,
+#transaction-modal #modal-pos-item{
+  min-height:38px!important;
+  border-radius:12px!important;
+  padding:9px 10px!important;
+  font-size:13px!important;
+  background:var(--bg2)!important;
+  border:1px solid var(--border)!important;
+  white-space:normal!important;
+}
+#transaction-modal #modal-pos-user{
+  padding:7px 8px!important;
+  line-height:1.25!important;
+}
+#transaction-modal .modal-product-entry{
+  grid-template-columns:minmax(0,1fr) auto!important;
+  gap:7px!important;
+  align-items:center!important;
+}
+#transaction-modal #modal-pos-item-add{
+  min-height:38px!important;
+  white-space:nowrap!important;
+  padding:8px 10px!important;
+  font-size:12px!important;
+  border-radius:12px!important;
+}
+#transaction-modal .modal-product-list{
+  display:grid!important;
+  gap:6px!important;
+  max-height:116px!important;
+  overflow:auto!important;
+  scrollbar-width:thin;
+}
+#transaction-modal .modal-product-row{
+  grid-template-columns:minmax(0,1fr) auto!important;
+  gap:7px!important;
+  border:1px solid var(--border)!important;
+  background:var(--bg2)!important;
+  border-radius:11px!important;
+  padding:7px 8px!important;
+}
+#transaction-modal .modal-product-row::before{display:none!important}
+#transaction-modal .modal-product-name{
+  color:var(--text)!important;
+  font-size:12.5px!important;
+  font-weight:850!important;
+  line-height:1.25!important;
+  overflow-wrap:anywhere!important;
+}
+#transaction-modal .modal-product-remove{
+  border:0!important;
+  border-radius:9px!important;
+  background:#fee2e2!important;
+  color:#b91c1c!important;
+  font-size:10.5px!important;
+  font-weight:900!important;
+  padding:6px 8px!important;
+}
+#transaction-modal .modal-product-empty{
+  border:1px dashed var(--border)!important;
+  background:var(--bg2)!important;
+  color:var(--text-soft)!important;
+  border-radius:11px!important;
+  padding:8px 9px!important;
+  font-size:11px!important;
+  line-height:1.35!important;
+}
+#transaction-modal #modal-pos-amount{
+  min-height:40px!important;
+  font-size:25px!important;
+  font-weight:950!important;
+  letter-spacing:-.04em!important;
+  color:var(--accent)!important;
+  background:transparent!important;
+}
+#transaction-modal #modal-pos-status{
+  margin:8px 0 0!important;
+  font-size:11px!important;
+  line-height:1.35!important;
+}
+#transaction-modal #modal-pos-status>div{
+  padding:8px 9px!important;
+  border-radius:11px!important;
+  gap:7px!important;
+}
+#transaction-modal #modal-pos-status span{font-size:11px!important;line-height:1.3!important}
+#transaction-modal #transaction-modal-actions.server-tx-actions{
+  position:sticky!important;
+  bottom:-10px!important;
+  margin-top:10px!important;
+  background:linear-gradient(180deg,rgba(255,255,255,0),var(--bg2) 22%)!important;
+  padding-top:12px!important;
+  padding-bottom:2px!important;
+  gap:7px!important;
+  grid-template-columns:1fr 1fr!important;
+}
+#transaction-modal #transaction-modal-actions.server-tx-actions #transaction-modal-actions{display:contents!important}
+#transaction-modal #transaction-modal-actions.server-tx-actions .btn{
+  min-height:38px!important;
+  border-radius:12px!important;
+  padding:9px 11px!important;
+  font-size:13px!important;
+  font-weight:850!important;
+  white-space:nowrap!important;
+}
+#transaction-modal #transaction-modal-actions.server-tx-actions button:first-child{
+  grid-column:1 / -1!important;
+  order:3!important;
+}
+#transaction-modal #transaction-modal-actions.server-tx-actions #transaction-modal-print-btn{order:1!important;background:var(--green)!important;color:#fff!important}
+#transaction-modal #transaction-modal-actions.server-tx-actions #transaction-modal-save-btn{order:2!important;background:var(--accent)!important;color:#fff!important}
+#transaction-payment-modal .server-payment-sheet{
+  width:min(360px,calc(100vw - 28px))!important;
+  max-width:min(360px,calc(100vw - 28px))!important;
+  max-height:none!important;
+  border:1.5px solid rgba(37,99,235,.35)!important;
+  border-radius:24px!important;
+  padding:12px!important;
+  box-shadow:0 24px 65px rgba(15,23,42,.34),0 0 0 1px rgba(255,255,255,.28)!important;
+}
+#transaction-payment-modal .server-payment-sheet>div[style*="grid-template-columns"]{
+  grid-template-columns:1fr!important;
+  gap:10px!important;
+}
+#transaction-payment-modal .server-payment-btn{
+  width:100%!important;
+  min-height:64px!important;
+  border-radius:17px!important;
+  font-size:17px!important;
+  font-weight:950!important;
+  letter-spacing:-.02em!important;
+  box-shadow:var(--shadow)!important;
+  transition:transform .12s ease,opacity .12s ease!important;
+}
+#transaction-payment-modal .server-payment-btn:active{transform:scale(.97)!important;opacity:.9!important}
+#transaction-payment-modal .server-payment-cash{
+  min-height:72px!important;
+  background:var(--green)!important;
+  border-color:var(--green)!important;
+  color:#fff!important;
+  box-shadow:0 9px 24px rgba(22,101,52,.28)!important;
+}
+#transaction-payment-modal .server-payment-qris{
+  background:linear-gradient(135deg,#f59e0b 0%,#ea7a12 100%)!important;
+  border-color:#ea7a12!important;
+  color:#fff!important;
+  box-shadow:0 8px 22px rgba(245,158,11,.30)!important;
+}
+#transaction-payment-summary{
+  padding:10px 11px!important;
+  border-radius:12px!important;
+  overflow:hidden!important;
+}
+@media(max-width:360px){
+  #transaction-modal.server-tx-wrap,
+  #transaction-payment-modal.server-payment-wrap{padding:12px!important}
+  #transaction-modal .server-tx-sheet{width:min(340px,calc(100vw - 24px))!important;max-width:min(340px,calc(100vw - 24px))!important;border-radius:22px!important}
+  #transaction-modal .server-tx-head{padding:10px 11px!important;border-radius:18px!important}
+  #transaction-modal #modal-pos-item,
+  #transaction-modal #modal-pos-user{min-height:36px!important;font-size:13px!important}
+  #transaction-modal #modal-pos-amount{font-size:24px!important;min-height:38px!important}
+  #transaction-modal #transaction-modal-actions.server-tx-actions .btn{min-height:38px!important;font-size:12.5px!important}
+  #transaction-payment-modal .server-payment-btn{min-height:58px!important;border-radius:15px!important;font-size:15px!important}
+  #transaction-payment-modal .server-payment-cash{min-height:66px!important}
+}
+#transaction-modal #transaction-modal-actions.server-tx-actions:has(#transaction-modal-print-btn[style*="display: none"]){grid-template-columns:1fr!important}
+#transaction-modal #transaction-modal-actions.server-tx-actions:has(#transaction-modal-print-btn[style*="display: none"]) #transaction-modal-save-btn{grid-column:1 / -1!important;order:1!important}
