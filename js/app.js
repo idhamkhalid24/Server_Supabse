@@ -3721,7 +3721,6 @@ ${lockedByGlobal ? 'Hanya user ini yang dibuka dari closing global. Bonus closin
 
   async function refreshCurrentPage() {
     if (!currentUser) return;
-    if (isTransactionModalVisible()) { queueTransactionModalUiRefresh(120); return; }
     if (currentPage === 'home') { await updateHomeStatus(); await updateHomeStats(); }
     else if (currentPage === 'history') await renderHistory();
     else if (currentPage === 'attendance') renderAttendanceAdminPage();
@@ -4323,8 +4322,8 @@ ${lockedByGlobal ? 'Hanya user ini yang dibuka dari closing global. Bonus closin
     }
     bindTransactionAmountFormatter('modal-pos-amount');
     setTransactionUserSelect(currentUser?.username || '');
+    modal.classList.add('show');
     modal.style.display = 'flex';
-    requestAnimationFrame(() => modal.classList.add('show'));
     if ($('transaction-modal-title')) $('transaction-modal-title').innerText = 'Transaksi';
     if ($('transaction-modal-save-btn')) $('transaction-modal-save-btn').innerText = 'Simpan';
     if ($('transaction-modal-print-btn')) $('transaction-modal-print-btn').style.display = 'inline-flex';
@@ -4347,14 +4346,13 @@ ${lockedByGlobal ? 'Hanya user ini yang dibuka dari closing global. Bonus closin
     } else {
       statusBox.innerHTML = `<div style="display:flex;align-items:center;gap:9px;padding:11px 13px;background:var(--red-dim);border:1px solid rgba(255,107,107,0.2);border-radius:11px"><i class="fas fa-circle-xmark" style="color:var(--red);font-size:13px"></i><span style="font-size:12.5px;color:var(--red);font-weight:600">Absen dulu sebelum transaksi!</span></div>`;
     }
-    setTimeout(() => $('modal-pos-item')?.focus?.(), 60);
+    setTimeout(() => $('modal-pos-item')?.focus?.(), 100);
   }
   function closeTransactionModal() {
     closeTransactionPaymentModal(true);
     transactionEditTargetId = null;
-    const modal = $('transaction-modal');
-    if (modal) { modal.classList.remove('show'); modal.style.display = 'none'; }
-    flushTransactionModalUiRefresh();
+    const modal = $('transaction-modal'); if (!modal) return;
+    modal.classList.remove('show'); modal.style.display = 'none';
   }
   function openTransactionPaymentModal(draft) {
     pendingTransactionPaymentDraft = { ...(draft || {}) };
@@ -4367,10 +4365,7 @@ ${lockedByGlobal ? 'Hanya user ini yang dibuka dari closing global. Bonus closin
       const txUserLabel = txUsername ? `${pendingTransactionPaymentDraft.name || txUsername} (@${txUsername})` : '';
       box.innerHTML = `<p class="label-xs" style="margin-bottom:6px">${isEditPayment ? 'Konfirmasi edit transaksi' : 'Konfirmasi transaksi'}</p>${txUserLabel ? `<p style="font-size:12px;color:var(--text-soft);font-weight:800;margin-bottom:7px"><i class="fas fa-user"></i> ${escapeHtml(txUserLabel)}</p>` : ''}<p style="font-family:var(--num-font);font-size:24px;font-weight:800;color:var(--accent);line-height:1">Rp ${formatRupiah(pendingTransactionPaymentDraft.amount || 0)}</p><p style="font-size:12px;color:var(--text);font-weight:700;margin-top:8px;white-space:pre-wrap;word-break:break-word">${escapeHtml(pendingTransactionPaymentDraft.note || 'Transaksi')}</p><p style="font-size:11px;color:var(--text-soft);margin-top:8px">${isEditPayment ? 'Pilih metode pembayaran baru. Edit akan disimpan dengan field Cash atau QRIS / Transfer agar selaras dengan aplikasi lain.' : 'Transaksi belum dikirim ke Supabase. Pilih salah satu metode untuk menyimpan sebagai sukses.'}</p>`;
     }
-    if (modal) {
-      modal.style.display = 'flex';
-      requestAnimationFrame(() => modal.classList.add('show'));
-    }
+    if (modal) { modal.classList.add('show'); modal.style.display = 'flex'; }
   }
   function closeTransactionPaymentModal(clearDraft = false) {
     const modal = $('transaction-payment-modal');
@@ -4383,40 +4378,6 @@ ${lockedByGlobal ? 'Hanya user ini yang dibuka dari closing global. Bonus closin
       b.removeAttribute('aria-busy');
     });
     if (clearDraft) pendingTransactionPaymentDraft = null;
-    flushTransactionModalUiRefresh();
-  }
-
-  let transactionModalRefreshPending = false;
-  let transactionModalRefreshTimer = 0;
-  function isTransactionModalVisible() {
-    return Boolean(
-      $('transaction-modal')?.classList.contains('show') ||
-      $('transaction-payment-modal')?.classList.contains('show')
-    );
-  }
-  function renderCurrentPageLiteAfterTransaction() {
-    if (!currentUser) return;
-    if (currentPage === 'history') return renderHistory();
-    if (currentPage === 'home') { updateHomeStatus(); updateHomeStats(); return; }
-    if (currentPage === 'report') return renderReport();
-    if (currentPage === 'closing') return renderAdminClosingPanelMaybe();
-  }
-  function queueTransactionModalUiRefresh(delay = 90) {
-    transactionModalRefreshPending = true;
-    clearTimeout(transactionModalRefreshTimer);
-    transactionModalRefreshTimer = setTimeout(() => {
-      transactionModalRefreshTimer = 0;
-      if (isTransactionModalVisible()) return;
-      transactionModalRefreshPending = false;
-      requestAnimationFrame(() => {
-        try { renderCurrentPageLiteAfterTransaction(); }
-        catch (e) { console.warn('Refresh ringan transaksi gagal:', e?.message || e); }
-      });
-    }, delay);
-  }
-  function flushTransactionModalUiRefresh() {
-    if (!transactionModalRefreshPending || isTransactionModalVisible()) return;
-    queueTransactionModalUiRefresh(40);
   }
   function handleTransactionModalSave() {
     if (transactionEditTargetId) return saveEditedTransaction();
@@ -4454,11 +4415,8 @@ ${lockedByGlobal ? 'Hanya user ini yang dibuka dari closing global. Bonus closin
     }
     const statusBox = $('modal-pos-status');
     if (statusBox) statusBox.innerHTML = `<div style="display:flex;align-items:center;gap:9px;padding:11px 13px;background:var(--amber-dim);border:1px solid rgba(255,196,107,0.2);border-radius:11px"><i class="fas fa-pen-to-square" style="color:var(--amber);font-size:13px"></i><span style="font-size:12.5px;color:var(--amber);font-weight:600">Mode edit: ubah user, catatan, nominal, lalu pilih Cash atau QRIS / Transfer.</span></div>`;
-    if (modal) {
-      modal.style.display = 'flex';
-      requestAnimationFrame(() => modal.classList.add('show'));
-    }
-    setTimeout(() => $('modal-pos-item')?.focus?.(), 60);
+    if (modal) { modal.classList.add('show'); modal.style.display = 'flex'; }
+    setTimeout(() => $('modal-pos-item')?.focus?.(), 100);
   }
 
   async function saveEditedTransaction() {
@@ -4583,8 +4541,7 @@ ${lockedByGlobal ? 'Hanya user ini yang dibuka dari closing global. Bonus closin
         pendingTransactionPaymentDraft = null;
         closeTransactionPaymentModal(true);
         closeTransactionModal();
-        serverScheduleDailyTargetCheck();
-        queueTransactionModalUiRefresh(30);
+        await refreshCurrentPage();
         setLoading(false);
         return;
       }
@@ -4670,10 +4627,8 @@ ${lockedByGlobal ? 'Hanya user ini yang dibuka dari closing global. Bonus closin
       showToast(`✓ Transaksi disimpan · ${paymentInfo.label}${shouldPrint ? ' · cetak struk' : ''}`);
       closeTransactionPaymentModal(true);
       closeTransactionModal();
-      serverScheduleDailyTargetCheck();
-      queueTransactionModalUiRefresh(30);
-      setLoading(false);
-      if (shouldPrint) setTimeout(() => directPrintReceiptText(buildTransactionReceiptText(savedTx), 'Struk Transaksi Baru'), 120);
+      await refreshCurrentPage();
+      if (shouldPrint) setTimeout(() => directPrintReceiptText(buildTransactionReceiptText(savedTx), 'Struk Transaksi Baru'), 180);
     } catch (e) {
       console.error(e);
       showToast(e.message || 'Gagal cek bonus terbaru. Transaksi belum disimpan.', true);
