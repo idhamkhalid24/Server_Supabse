@@ -4079,11 +4079,31 @@ ${lockedByGlobal ? 'Hanya user ini yang dibuka dari closing global. Bonus closin
     const rows = (Array.isArray(items) ? items : []).map(normalizeTransactionProductName).filter(Boolean);
     return rows.length ? rows.join('\n') : fallback;
   }
-  function getModalTransactionProductText() {
-    const inputValue = normalizeTransactionProductName($('modal-pos-item')?.value || '');
+
+  // Cache untuk getModalTransactionProductText
+  let _lastModalTransactionProductTextCache = '';
+  let _lastModalTransactionItemsCache = ''; // JSON.stringify dari modalTransactionItems
+  let _lastModalPosItemValueCache = '';
+
+  function getModalTransactionProductText(forceRecalculate = false) {
+    const currentModalPosItemValue = normalizeTransactionProductName($('modal-pos-item')?.value || '');
+    const currentModalTransactionItemsString = JSON.stringify(modalTransactionItems); // Gunakan stringify sebagai hash konten array
+
+    if (!forceRecalculate &&
+        currentModalTransactionItemsString === _lastModalTransactionItemsCache &&
+        currentModalPosItemValue === _lastModalPosItemValueCache) {
+      return _lastModalTransactionProductTextCache; // Kembalikan nilai cache jika tidak ada perubahan
+    }
+
     const rows = [...modalTransactionItems];
-    if (inputValue) rows.push(inputValue);
-    return transactionProductTextFromItems(rows, 'Transaksi');
+    if (currentModalPosItemValue) rows.push(currentModalPosItemValue);
+    const newText = transactionProductTextFromItems(rows, 'Transaksi');
+
+    _lastModalTransactionItemsCache = currentModalTransactionItemsString;
+    _lastModalPosItemValueCache = currentModalPosItemValue;
+    _lastModalTransactionProductTextCache = newText;
+
+    return newText;
   }
   function renderModalTransactionItems() {
     const input = $('modal-pos-item');
@@ -4092,7 +4112,11 @@ ${lockedByGlobal ? 'Hanya user ini yang dibuka dari closing global. Bonus closin
     const hidden = $('modal-pos-note');
     forceUppercaseInputValue(input);
     if (add) add.disabled = !String(input?.value || '').trim();
-    if (hidden) hidden.value = getModalTransactionProductText();
+    // Hanya update hidden.value jika nilainya benar-benar berubah
+    const currentProductText = getModalTransactionProductText();
+    if (hidden && hidden.value !== currentProductText) {
+      hidden.value = currentProductText;
+    }
     if (!list) return;
     if (!modalTransactionItems.length) {
       list.innerHTML = '<div class="modal-product-empty">Ketik 1 barang boleh langsung Simpan/Cetak. Tombol tambah hanya untuk barang berikutnya.</div>';
