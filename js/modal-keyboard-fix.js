@@ -19,11 +19,22 @@
     var modal = modalOf(el);
     if (!modal) return;
     modal.classList.add('keyboard-safe');
+    if (modal.id === 'transaction-modal') {
+      modal.style.alignItems = 'flex-start';
+      modal.style.justifyContent = 'center';
+      modal.style.paddingTop = '8px';
+    }
     setVisualViewportVars();
     setTimeout(function(){
       try { el.scrollIntoView({ block:'center', inline:'nearest', behavior:'auto' }); } catch(_) { try { el.scrollIntoView(false); } catch(__) {} }
       var sheet = el.closest('.modal-sheet');
-      if (sheet && sheet.scrollHeight > sheet.clientHeight) sheet.scrollTop = Math.max(0, sheet.scrollTop - 6);
+      if (sheet) {
+        sheet.scrollTop = Math.max(0, sheet.scrollTop - 6);
+        if (modal.id === 'transaction-modal') {
+          try { sheet.scrollIntoView({ block:'start', inline:'nearest', behavior:'auto' }); } catch(_) {}
+        }
+      }
+      try { window.scrollTo(0, 0); } catch(_) {}
     }, 120);
   }
   function clearKeyboardSafeLater(){
