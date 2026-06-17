@@ -1885,7 +1885,9 @@ import { createClient as createSupabaseClient } from "https://cdn.jsdelivr.net/n
           </div>
           <span class="user-chip" style="font-size:10px;padding:3px 7px;color:${reached ? 'var(--green)' : 'var(--accent)'};background:${reached ? 'var(--green-dim)' : 'var(--accent-dim)'};white-space:nowrap">${unread ? 'Baru' : (reached ? 'Tercapai' : pctText + '%')}</span>
         </div>
-        <div style="height:9px;border-radius:999px;background:rgba(148,163,184,.24);overflow:hidden;margin-top:11px"><span style="display:block;height:100%;width:${pct}%;border-radius:999px;background:linear-gradient(90deg,var(--accent),var(--green))"></span></div>
+        <div class="server-target-meter" style="--server-target-pct:${pct}%">
+          <span class="server-target-meter-fill"></span>
+        </div>
         <div style="display:grid;grid-template-columns:1fr 1fr;gap:8px;margin-top:10px">
           <button onclick="openServerDailyTargetSettings()" class="btn" style="width:100%;padding:9px 10px;font-size:11px"><i class="fas fa-sliders"></i> Atur Target</button>
           ${unread ? `<button onclick="markServerDailyTargetRead()" class="btn" style="width:100%;padding:9px 10px;font-size:11px;background:var(--green);color:#fff;border-color:var(--green)"><i class="fas fa-check"></i> Tandai dibaca</button>` : `<button onclick="manualRefreshData()" class="btn" style="width:100%;padding:9px 10px;font-size:11px"><i class="fas fa-rotate"></i> Refresh</button>`}
@@ -4959,10 +4961,10 @@ ${lockedByGlobal ? 'Hanya user ini yang dibuka dari closing global. Bonus closin
             <i class="fas fa-lock"></i> ${closing?'Sudah Diclosing':'Closing Target Ini'}
           </button>
           <div style="display:grid;grid-template-columns:1fr 1fr;gap:8px">
-            <button onclick="handleEditClosingTime()" ${closing && !lockedByGlobal?'':'disabled'} class="btn btn-glass" style="min-height:40px;padding:10px 8px;font-size:12px;border-radius:13px">
+            <button onclick="handleEditClosingTime()" ${closing && !lockedByGlobal?'':'disabled'} class="btn btn-glass" style="min-height:40px;padding:10px 8px;font-size:12px;border-radius:13px;justify-content:center;white-space:nowrap">
               <i class="fas fa-pen-to-square"></i> Edit Jam
             </button>
-            <button onclick="handleCancelClosingToday()" ${closing?'':'disabled'} class="btn btn-danger" style="min-height:40px;padding:10px 8px;font-size:12px;border-radius:13px">
+            <button onclick="handleCancelClosingToday()" ${closing?'':'disabled'} class="btn btn-danger closing-cancel-btn" style="min-height:40px;padding:10px 8px;font-size:12px;border-radius:13px;justify-content:center;white-space:nowrap">
               <i class="fas fa-unlock"></i> ${lockedByGlobal?'Buka User':'Batal Closing'}
             </button>
           </div>
@@ -5166,8 +5168,10 @@ ${lockedByGlobal ? 'Hanya user ini yang dibuka dari closing global. Bonus closin
           const txTime = transactionHistoryTimeLabel(t);
           const itemCount = transactionProductItemsFromText(t.note || 'Transaksi', 'Transaksi').length;
           const payLabel = getTransactionPaymentLabel(t);
+          const payMethod = normalizeTransactionPaymentMethod(t.paymentMethod || t.payment_method || t.paymentLabel || t.payment_label || t.paymentType || t.payment_type || t.metodePembayaran || t.metode_pembayaran) || 'cash';
+          const trxCardClass = payMethod === 'qris_transfer' ? ' trx-card-qris' : ' trx-card-cash';
           return `
-          <div class="trx-card">
+          <div class="trx-card${trxCardClass}">
             <div class="trx-icon" style="font-family:var(--num-font);font-weight:900;color:#000 !important;background:#ffd600 !important;box-shadow:0 1.5px 4px rgba(184, 146, 0, 0.3) !important">${itemCount}</div>
             <div style="flex:1;min-width:0">
               <div style="display:flex;align-items:center;gap:7px;margin-bottom:2px;flex-wrap:wrap">
@@ -5180,10 +5184,10 @@ ${lockedByGlobal ? 'Hanya user ini yang dibuka dari closing global. Bonus closin
               </div>
             </div>
             <div class="trx-actions-inline" style="flex-shrink:0">
-              <button onclick="openTransactionDetail('${txId}')" class="btn btn-glass" title="Detail"><i class="fas fa-list"></i></button>
-              <button onclick="printTransactionReceipt('${txId}')" class="btn btn-success" title="Cetak"><i class="fas fa-print"></i></button>
-              <button onclick="openEditTransactionModal('${txId}')" class="btn btn-glass" title="Edit"><i class="fas fa-pen"></i></button>
-              <button onclick="deleteTransaction('${txId}')" class="btn btn-danger" title="Hapus"><i class="fas fa-trash-can"></i></button>
+              <button onclick="openTransactionDetail('${txId}')" class="btn btn-glass icon-action-btn" title="Detail"><i class="fas fa-list"></i></button>
+              <button onclick="printTransactionReceipt('${txId}')" class="btn btn-success icon-action-btn" title="Cetak"><i class="fas fa-print"></i></button>
+              <button onclick="openEditTransactionModal('${txId}')" class="btn btn-glass icon-action-btn icon-edit-btn" title="Edit"><i class="fas fa-pen"></i></button>
+              <button onclick="deleteTransaction('${txId}')" class="btn btn-danger icon-action-btn icon-trash-btn" title="Hapus"><i class="fas fa-trash-can"></i></button>
             </div>
           </div>
         `}).join('') || `<div style="text-align:center;padding:56px 0;color:var(--text-ghost)"><i class="fas fa-inbox" style="font-size:30px;margin-bottom:10px;display:block;opacity:0.5"></i><p style="font-size:12.5px">Tidak ada transaksi</p></div>`}
@@ -5471,12 +5475,12 @@ ${lockedByGlobal ? 'Hanya user ini yang dibuka dari closing global. Bonus closin
         </div>
         <div style="display:flex;flex-direction:column;gap:7px;font-size:12px">
           ${[
-            ['Bonus Transaksi Staff', totals.staffTrxBonus, 'fa-percent', 'var(--accent)'],
-            ['Gaji / Bonus Harian', totals.dailySalary, 'fa-user-clock', 'var(--green)'],
-            ['Bonus Closing', totals.closingBonus, 'fa-lock', 'var(--amber)'],
-            ['Bonus Manual', totals.manualBonus, 'fa-pen-to-square', totals.manualBonus < 0 ? 'var(--red)' : 'var(--amber)']
-          ].map(([label, value, icon, color]) => `<div style="display:flex;justify-content:space-between;align-items:center;gap:10px;padding:8px 10px;border:1px solid var(--border);border-radius:11px;background:var(--surface)"><span style="color:var(--text-soft)"><i class="fas ${icon}" style="color:${color};width:16px"></i> ${label}</span><strong style="font-family:var(--num-font);color:${color}">Rp ${formatRupiah(value)}</strong></div>`).join('')}
-          <div style="display:flex;justify-content:space-between;align-items:center;gap:10px;padding:10px;border:1px solid rgba(255,196,107,.22);border-radius:12px;background:var(--amber-dim)"><span style="font-weight:800;color:var(--amber)">Total dibayarkan</span><strong style="font-family:var(--num-font);font-size:15px;color:var(--amber)">Rp ${formatRupiah(totals.totalBonus)}</strong></div>
+            ['Bonus Transaksi Staff', totals.staffTrxBonus, 'fa-percent'],
+            ['Gaji / Bonus Harian', totals.dailySalary, 'fa-user-clock'],
+            ['Bonus Closing', totals.closingBonus, 'fa-lock'],
+            ['Bonus Manual', totals.manualBonus, 'fa-pen-to-square']
+          ].map(([label, value, icon]) => `<div style="display:flex;justify-content:space-between;align-items:center;gap:10px;padding:8px 10px;border:1px solid var(--border);border-radius:11px;background:var(--surface)"><span style="color:#171717;font-weight:700"><i class="fas ${icon}" style="color:#171717;width:16px"></i> ${label}</span><strong style="font-family:var(--num-font);color:#171717">Rp ${formatRupiah(value)}</strong></div>`).join('')}
+          <div style="display:flex;justify-content:space-between;align-items:center;gap:10px;padding:10px;border:1px solid rgba(255,196,107,.22);border-radius:12px;background:var(--amber-dim)"><span style="font-weight:800;color:#171717">Total dibayarkan</span><strong style="font-family:var(--num-font);font-size:15px;color:#171717">Rp ${formatRupiah(totals.totalBonus)}</strong></div>
         </div>
       </div>
       <div class="card page-in s2" style="padding:13px 14px;margin-top:10px">
@@ -8230,19 +8234,19 @@ Masukkan PIN admin:`);
               <div style="min-width:0"><div style="font-size:13px;font-weight:850">${escapeHtml(u.name || username)}</div><div style="font-size:10.5px;color:var(--text-soft);margin-top:3px">${escapeHtml(sub)}</div></div>
               <span class="status-pill ${daily ? 'status-warn' : 'status-ok'}" style="font-size:9.5px;padding:4px 8px;white-space:nowrap">${daily ? 'HARIAN' : 'STAFF'}</span>
             </div>
-            <div style="display:grid;grid-template-columns:1fr 1fr;gap:8px">
-              <div>
-                <label style="font-size:10px;color:var(--text-ghost);font-weight:800;text-transform:uppercase;margin-bottom:5px;display:block">Bonus Transaksi (%)</label>
-                <input id="bonus-ctl-trx-${escapeHtml(username)}" class="g-input" inputmode="decimal" value="${escapeHtml(trxPercent)}" placeholder="Contoh 1.5" />
+            <div class="bonus-control-compact-row">
+              <div class="bonus-control-field">
+                <label>Bonus Transaksi (%)</label>
+                <input id="bonus-ctl-trx-${escapeHtml(username)}" class="g-input bonus-control-input" inputmode="decimal" value="${escapeHtml(trxPercent)}" placeholder="1.5" />
               </div>
-              <div>
-                <label style="font-size:10px;color:var(--text-ghost);font-weight:800;text-transform:uppercase;margin-bottom:5px;display:block">Bonus Closing / Menit</label>
-                <input id="bonus-ctl-closing-${escapeHtml(username)}" class="g-input" inputmode="numeric" value="${escapeHtml(closingMinute)}" ${daily ? 'disabled' : ''} placeholder="${daily ? 'Terkunci' : 'Contoh 100'}" />
+              <div class="bonus-control-field">
+                <label>Bonus Closing / Menit</label>
+                <input id="bonus-ctl-closing-${escapeHtml(username)}" class="g-input bonus-control-input" inputmode="numeric" value="${escapeHtml(closingMinute)}" ${daily ? 'disabled' : ''} placeholder="${daily ? 'Terkunci' : '100'}" />
               </div>
+              <button onclick="saveUserBonusControl('${escapeHtml(username)}')" class="btn btn-primary bonus-save-btn"><i class="fas fa-floppy-disk"></i> Simpan</button>
             </div>
-            <div style="display:flex;justify-content:space-between;align-items:center;gap:10px;margin-top:8px">
+            <div style="display:flex;align-items:center;gap:6px;margin-top:7px">
               <span style="font-size:10.5px;color:${daily ? 'var(--amber)' : 'var(--text-soft)'};line-height:1.3">${daily ? '<i class="fas fa-lock"></i> Closing terkunci untuk harian' : '<i class="fas fa-lock-open"></i> Closing aktif untuk staff'}</span>
-              <button onclick="saveUserBonusControl('${escapeHtml(username)}')" class="btn btn-primary" style="width:auto;min-width:92px;padding:9px 12px;font-size:11px;border-radius:12px"><i class="fas fa-floppy-disk"></i> Simpan</button>
             </div>
           </div>`;
         }).join('') : `<div style="font-size:12px;color:var(--text-soft);padding:10px 0">Belum ada user staff/karyawan harian aktif.</div>`}
@@ -8734,8 +8738,8 @@ Masukkan PIN admin:`);
               ${isRecordDeleted(a) ? `
                 <button onclick="restoreAdminAttendance('${escapeHtml(a.id)}')" class="btn btn-glass" style="width:34px;height:34px;padding:0;font-size:11px;border-radius:10px" title="Pulihkan"><i class="fas fa-rotate-left"></i></button>
               ` : `
-                <button onclick="openAdminAttendanceModal('${escapeHtml(a.id)}')" class="btn btn-glass" style="width:34px;height:34px;padding:0;font-size:11px;border-radius:10px" title="Edit"><i class="fas fa-pen"></i></button>
-                <button onclick="deleteAdminAttendance('${escapeHtml(a.id)}')" class="btn btn-danger" style="width:34px;height:34px;padding:0;font-size:11px;border-radius:10px" title="Hapus"><i class="fas fa-trash"></i></button>
+                <button onclick="openAdminAttendanceModal('${escapeHtml(a.id)}')" class="btn btn-glass icon-action-btn icon-edit-btn" style="width:34px;height:34px;padding:0;font-size:11px;border-radius:10px" title="Edit"><i class="fas fa-pen"></i></button>
+                <button onclick="deleteAdminAttendance('${escapeHtml(a.id)}')" class="btn btn-danger icon-action-btn icon-trash-btn" style="width:34px;height:34px;padding:0;font-size:11px;border-radius:10px" title="Hapus"><i class="fas fa-trash"></i></button>
               `}
             </div>
           </div>
