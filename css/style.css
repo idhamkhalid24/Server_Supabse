@@ -1108,26 +1108,6 @@ input::placeholder{
 /* ===== END PATCH BOTTOM NAV ICON/TEXT BLACK ===== */
 
 
-/* ===== PATCH QRIS CARD SPECIAL COLOR ===== */
-.trx-card.trx-card-qris{
-  background:#dff5f8!important;
-  border-color:#3a3a3a!important;
-}
-.trx-card.trx-card-qris .trx-amount,
-.trx-card.trx-card-qris .trx-time,
-.trx-card.trx-card-qris .trx-note{
-  color:#1f1f1f!important;
-}
-.trx-card.trx-card-qris .badge-blue{
-  background:#bfeef3!important;
-  color:#195f6b!important;
-  border-color:var(--border)!important;
-}
-.trx-card.trx-card-qris .btn-success{
-  background:#c8d3ff!important;
-  color:#1f1f1f!important;
-}
-/* ===== END PATCH QRIS CARD SPECIAL COLOR ===== */
 
 
 /* ===== PATCH YELLOW TEXT BLACK + COMPACT BADGE ===== */
@@ -1756,3 +1736,64 @@ span[class*="target-progress-fill"]{
   }
 }
 /* ===== END PATCH ALL PIN POPUP INPUT BIGGER ===== */
+
+
+
+
+/* ===== PATCH QRIS CARD ORANGE NEO BRUTALISM ===== */
+.trx-card.trx-card-qris{
+  background:#ffb347!important;
+  border-color:#2f2f2f!important;
+  box-shadow:0 6px 0 rgba(0,0,0,.18)!important;
+}
+
+.trx-card.trx-card-qris .trx-amount,
+.trx-card.trx-card-qris .trx-time,
+.trx-card.trx-card-qris .trx-note,
+.trx-card.trx-card-qris .user-chip,
+.trx-card.trx-card-qris .badge,
+.trx-card.trx-card-qris .loc-chip,
+.trx-card.trx-card-qris .status-pill{
+  color:#171717!important;
+}
+
+.trx-card.trx-card-qris .badge-blue,
+.trx-card.trx-card-qris .badge-green,
+.trx-card.trx-card-qris .loc-in,
+.trx-card.trx-card-qris .status-ok{
+  background:#ff8a00!important;
+  color:#171717!important;
+  border:2px solid var(--border)!important;
+  font-weight:900!important;
+}
+
+.trx-card.trx-card-qris .user-chip{
+  background:#fff7ea!important;
+  border:2px solid var(--border)!important;
+}
+
+.trx-card.trx-card-qris .trx-icon,
+.trx-card.trx-card-qris .setting-ico{
+  background:#ff7a00!important;
+  color:#171717!important;
+  border-color:var(--border)!important;
+}
+
+.trx-card.trx-card-qris .btn-success{
+  background:#ffd2a3!important;
+  color:#171717!important;
+  border-color:var(--border)!important;
+}
+
+.trx-card.trx-card-qris .btn-glass{
+  background:#fff2df!important;
+  color:#171717!important;
+  border-color:var(--border)!important;
+}
+
+.trx-card.trx-card-qris .btn-danger{
+  background:#ffffff!important;
+  color:#b14f5a!important;
+  border-color:var(--border)!important;
+}
+/* ===== END PATCH QRIS CARD ORANGE NEO BRUTALISM ===== */
