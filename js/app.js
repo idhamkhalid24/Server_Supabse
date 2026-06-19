@@ -445,10 +445,17 @@ import { createClient as createSupabaseClient } from "https://cdn.jsdelivr.net/n
   const CASH_FISIK_OWNER_ID = 'rocky-hijab';
   const CASHOUT_PREFIX = '[CASHOUT:';
   const OPS_PREFIX = '[OPS] ';
+  const CASH_DRAWER_TABLE = 'cash_drawer_audits';
+  const CASH_DRAWER_ADJ_PREFIX = '[SELISIH_LACI:';
+  const CASH_DRAWER_MINUS_CATEGORY_NAME = 'Selisih Kas Minus';
+  const CASH_DRAWER_PLUS_CATEGORY_NAME = 'Selisih Kas Lebih';
   const cashFisikSupabase = createSupabaseClient(CASH_FISIK_SUPABASE_URL, CASH_FISIK_SUPABASE_ANON_KEY);
   let cachedFinanceCashRows = [];
   let cachedFinanceCashDateKey = '';
   let cachedFinanceCashFetchedAt = 0;
+  let cachedFinanceCashAuditRows = [];
+  let cachedFinanceCashAuditDateKey = '';
+  let cachedFinanceCashAuditFetchedAt = 0;
 
   const TRANSACTION_PAYMENT_METHODS = { cash: 'Cash', qris_transfer: 'QRIS / Transfer' };
   let pendingTransactionPaymentDraft = null;
@@ -4982,15 +4989,50 @@ ${lockedByGlobal ? 'Hanya user ini yang dibuka dari closing global. Bonus closin
     const n = Number(value || 0);
     return Number.isFinite(n) ? Math.abs(n) : 0;
   }
+  function financeRoundRp(value) {
+    const n = Number(value || 0);
+    return Number.isFinite(n) ? Math.round(n) : 0;
+  }
+  function isFinanceCashDrawerAdjustmentTx(rec = {}) {
+    const desc = String(rec && rec.description || '');
+    const category = String(rec && rec.category_name || '').toLowerCase();
+    return desc.startsWith(CASH_DRAWER_ADJ_PREFIX)
+      || category === CASH_DRAWER_MINUS_CATEGORY_NAME.toLowerCase()
+      || category === CASH_DRAWER_PLUS_CATEGORY_NAME.toLowerCase();
+  }
   function isFinanceOpsExpense(rec = {}) {
-    return rec && String(rec.type || '').toLowerCase() === 'expense' && String(rec.description || '').startsWith(OPS_PREFIX);
+    return rec && !isFinanceCashDrawerAdjustmentTx(rec) && String(rec.type || '').toLowerCase() === 'expense' && String(rec.description || '').startsWith(OPS_PREFIX);
   }
   function isFinanceCashOut(rec = {}) {
-    return rec && String(rec.type || '').toLowerCase() === 'expense' && String(rec.description || '').startsWith(CASHOUT_PREFIX);
+    return rec && !isFinanceCashDrawerAdjustmentTx(rec) && String(rec.type || '').toLowerCase() === 'expense' && String(rec.description || '').startsWith(CASHOUT_PREFIX);
   }
   function getFinanceCashOutType(rec = {}) {
     const m = String(rec.description || '').match(/^?\[CASHOUT:(\w+)\]/i) || String(rec.description || '').match(/^\[CASHOUT:(\w+)\]/i);
     return m ? String(m[1] || '').toLowerCase() : 'lainnya';
+  }
+  function normalizeFinanceCashDrawerAudit(rec = {}) {
+    const diff = financeRoundRp(rec.differenceAmount ?? rec.difference_amount ?? 0);
+    const rawStatus = String(rec.status || (diff < 0 ? 'minus' : diff > 0 ? 'lebih' : 'pas')).toLowerCase();
+    const status = ['minus', 'pas', 'lebih'].includes(rawStatus) ? rawStatus : (diff < 0 ? 'minus' : diff > 0 ? 'lebih' : 'pas');
+    const date = String(rec.dateKey || rec.date_key || rec.date || toDateKey(nowDate())).slice(0, 10);
+    return {
+      id: Number(rec.id || 0),
+      owner_id: rec.owner_id || CASH_FISIK_OWNER_ID,
+      dateKey: date,
+      baseAmount: financeRoundRp(rec.baseAmount ?? rec.base_amount ?? 0),
+      expectedAmount: financeRoundRp(rec.expectedAmount ?? rec.expected_amount ?? 0),
+      actualAmount: financeRoundRp(rec.actualAmount ?? rec.actual_amount ?? 0),
+      differenceAmount: diff,
+      previousAdjustmentAmount: financeRoundRp(rec.previousAdjustmentAmount ?? rec.previous_adjustment_amount ?? 0),
+      adjustmentAmount: financeRoundRp(rec.adjustmentAmount ?? rec.adjustment_amount ?? 0),
+      status,
+      createdAt: rec.createdAt || rec.created_at || '',
+      updatedAt: rec.updatedAt || rec.updated_at || ''
+    };
+  }
+  function financeCashDrawerAdjustmentTxAuditId(rec = {}) {
+    const m = String(rec && rec.description || '').match(/^\[SELISIH_LACI:([^\]]+)\]/);
+    return m ? String(m[1] || '') : '';
   }
   async function fetchFinanceCashRows(dateKey = toDateKey(nowDate()), force = false) {
     const now = Date.now();
@@ -5000,7 +5042,7 @@ ${lockedByGlobal ? 'Hanya user ini yang dibuka dari closing global. Bonus closin
     try {
       const { data, error } = await cashFisikSupabase
         .from('transactions')
-        .select('id,date,description,amount,type')
+        .select('id,date,description,amount,type,category_id,category_name')
         .eq('owner_id', CASH_FISIK_OWNER_ID)
         .eq('date', dateKey)
         .order('id', { ascending: false });
@@ -5010,7 +5052,9 @@ ${lockedByGlobal ? 'Hanya user ini yang dibuka dari closing global. Bonus closin
         date: r.date,
         description: String(r.description || ''),
         amount: Number(r.amount || 0),
-        type: String(r.type || '')
+        type: String(r.type || ''),
+        category_id: r.category_id || '',
+        category_name: String(r.category_name || '')
       }));
       cachedFinanceCashDateKey = dateKey;
       cachedFinanceCashFetchedAt = now;
@@ -5021,6 +5065,54 @@ ${lockedByGlobal ? 'Hanya user ini yang dibuka dari closing global. Bonus closin
       return [];
     }
   }
+  async function fetchFinanceCashAuditRows(dateKey = toDateKey(nowDate()), force = false) {
+    const now = Date.now();
+    if (!force && cachedFinanceCashAuditDateKey === dateKey && (now - cachedFinanceCashAuditFetchedAt) < 15000) {
+      return cachedFinanceCashAuditRows;
+    }
+    try {
+      const { data, error } = await cashFisikSupabase
+        .from(CASH_DRAWER_TABLE)
+        .select('*')
+        .eq('owner_id', CASH_FISIK_OWNER_ID)
+        .eq('date_key', dateKey)
+        .order('created_at', { ascending: false })
+        .limit(20);
+      if (error) throw error;
+      cachedFinanceCashAuditRows = (data || []).map(normalizeFinanceCashDrawerAudit);
+      cachedFinanceCashAuditDateKey = dateKey;
+      cachedFinanceCashAuditFetchedAt = now;
+      return cachedFinanceCashAuditRows;
+    } catch (e) {
+      console.warn('Audit Laci Cash Supabase gagal:', e?.message || e);
+      if (cachedFinanceCashAuditDateKey === dateKey) return cachedFinanceCashAuditRows;
+      return [];
+    }
+  }
+  function latestFinanceCashDrawerAudit(auditRows = [], dateKey = toDateKey(nowDate())) {
+    const d = String(dateKey || toDateKey(nowDate())).slice(0, 10);
+    return (auditRows || [])
+      .filter(r => String(r.dateKey || '').slice(0, 10) === d)
+      .sort((a, b) => (Date.parse(b.createdAt || '') || Number(b.id || 0)) - (Date.parse(a.createdAt || '') || Number(a.id || 0)))[0] || null;
+  }
+  function financeCashDrawerAdjustmentForDate(financeRows = [], auditRows = [], dateKey = toDateKey(nowDate())) {
+    const d = String(dateKey || toDateKey(nowDate())).slice(0, 10);
+    const latest = latestFinanceCashDrawerAudit(auditRows, d);
+    let adjustmentRows = (financeRows || []).filter(r => String(r.date || '').slice(0, 10) === d && isFinanceCashDrawerAdjustmentTx(r));
+    if (latest) {
+      const byAudit = adjustmentRows.filter(r => String(financeCashDrawerAdjustmentTxAuditId(r)) === String(latest.id));
+      if (byAudit.length) adjustmentRows = byAudit;
+      else if (!adjustmentRows.length && latest.status !== 'pas' && financeRoundRp(latest.adjustmentAmount) !== 0) {
+        return financeRoundRp(latest.adjustmentAmount);
+      }
+    }
+    return financeRoundRp(adjustmentRows.reduce((sum, row) => {
+      const type = String(row.type || '').toLowerCase();
+      const amount = normalizeFinanceAmount(row.amount);
+      return sum + (type === 'income' ? amount : -amount);
+    }, 0));
+  }
+
   function getSupabaseOmzetForCashFisik(dateKey = toDateKey(nowDate())) {
     return getVisibleTransactions()
       .filter(t => !isRecordDeleted(t) && extractDateKey(t) === dateKey)
@@ -5028,17 +5120,20 @@ ${lockedByGlobal ? 'Hanya user ini yang dibuka dari closing global. Bonus closin
   }
   async function getHomeCashFisikBreakdown(dateKey = toDateKey(nowDate()), force = false) {
     const financeRows = await fetchFinanceCashRows(dateKey, force);
+    const auditRows = await fetchFinanceCashAuditRows(dateKey, force);
     const fbTotal = getSupabaseOmzetForCashFisik(dateKey);
     const opsTotal = financeRows.filter(isFinanceOpsExpense).reduce((s, t) => s + normalizeFinanceAmount(t.amount), 0);
     const cashOutRows = financeRows.filter(isFinanceCashOut);
     const qris = cashOutRows.filter(t => getFinanceCashOutType(t) === 'qris').reduce((s, t) => s + normalizeFinanceAmount(t.amount), 0);
     const tabungan = cashOutRows.filter(t => getFinanceCashOutType(t) === 'tabungan').reduce((s, t) => s + normalizeFinanceAmount(t.amount), 0);
     const lainnya = cashOutRows.filter(t => !['qris','tabungan'].includes(getFinanceCashOutType(t))).reduce((s, t) => s + normalizeFinanceAmount(t.amount), 0);
+    const laci = financeCashDrawerAdjustmentForDate(financeRows, auditRows, dateKey);
     const manualIncome = financeRows
-      .filter(t => String(t.type || '').toLowerCase() === 'income' && !String(t.description || '').startsWith('[FIREBASE:'))
+      .filter(t => !isFinanceCashDrawerAdjustmentTx(t) && String(t.type || '').toLowerCase() === 'income' && !String(t.description || '').startsWith('[FIREBASE:'))
       .reduce((s, t) => s + normalizeFinanceAmount(t.amount), 0);
-    const cashFisik = fbTotal - opsTotal - qris - tabungan - lainnya;
-    return { rows: financeRows, omzet: fbTotal, ops: opsTotal, qris, tabungan, lainnya, manualIncome, deduction: opsTotal + qris + tabungan + lainnya, cashFisik };
+    const deduction = financeRoundRp(opsTotal + qris + tabungan + lainnya - laci);
+    const cashFisik = Math.max(0, financeRoundRp(fbTotal - deduction));
+    return { rows: financeRows, audits: auditRows, omzet: fbTotal, ops: opsTotal, qris, tabungan, lainnya, laci, manualIncome, deduction, cashFisik };
   }
   async function updateHomeCashFisikCard(dateKey = toDateKey(nowDate()), force = false) {
     const data = await getHomeCashFisikBreakdown(dateKey, force);
