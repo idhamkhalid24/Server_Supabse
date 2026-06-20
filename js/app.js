@@ -1853,6 +1853,58 @@ import { createClient as createSupabaseClient } from "https://cdn.jsdelivr.net/n
       await serverNotifyTarget(summary, plan);
     }
   }
+  async function serverReevaluateDailyTarget(d) {
+    if (!state.user) return;
+    try {
+      const [txSnap, attSnap, targetSnap] = await Promise.all([
+        getDocsFromServer(query(collection(db,'transactions'),where('dateKey','==',d),limit(500))),
+        getDocsFromServer(query(collection(db,'attendance'),where('dateKey','==',d),limit(100))),
+        getDocFromServer(doc(db,SERVER_DAILY_TARGETS_TABLE,serverTargetDocId(d))).catch(()=>null)
+      ]);
+      const tx = txSnap.docs.map(x=>({id:x.id,...x.data()}));
+      const att = attSnap.docs.map(x=>({id:x.id,...x.data()}));
+      
+      const activeSet = new Set(realActiveUsers().filter(u=>String(u.role||'').toLowerCase()!=='admin').map(u=>cleanUser(u.username||u.id)).filter(Boolean));
+      const validTx = tx.filter(t=>!isDeleted(t)&&!isTrialRecord(t)&&String(t.dateKey||'').slice(0,10)===d&&(!activeSet.size||activeSet.has(cleanUser(t.user))));
+      const totalAmount = validTx.reduce((sum,t)=>sum+Number(t.amount||0),0);
+      
+      const settings = serverNormalizeTargetSettings(state.targetSettingRows?.find(r=>r.effectiveDate===d||r.dateKey===d)||serverPickTargetSettings(state.targetSettingRows||[],d)||{}, d);
+      const targetAmount = Math.max(1,Number(settings.targetAmount||SERVER_DAILY_TARGET_AMOUNT));
+      const bonusAmount = Number(settings.bonusAmount||0);
+      const reached = totalAmount >= targetAmount;
+      
+      const summary = {dateKey:d,targetSettingDate:settings.effectiveDate||settings.dateKey||d,targetAmount,totalAmount,progressPercent:Number(((totalAmount/targetAmount)*100).toFixed(2)),reached,remainingAmount:Math.max(0,targetAmount-totalAmount),bonusAmount};
+      
+      const attUsers = new Set(att.filter(a=>!isDeleted(a)&&!isTrialRecord(a)&&extractDateKey(a)===d).map(a=>cleanUser(a.user)).filter(Boolean));
+      const users = realActiveUsers().filter(u=>String(u.role||'').toLowerCase()!=='admin').map(u=>({...u,username:cleanUser(u.username||u.id)})).filter(u=>u.username);
+      const hasRismaTx = validTx.some(t=>cleanUser(t.user||t.username||t.kasir||t.createdBy||'')==='risma'&&Number(t.amount||0)>0);
+      const active = users.map(u=>u.username);
+      const rewarded = users.filter(u=>u.username==='risma'?hasRismaTx:(!isDaily(u)&&attUsers.has(u.username))).map(u=>u.username);
+      const map = new Map(users.map(u=>[u.username,u]));
+      const plan = {activeUsers:active,rewardedUsers:rewarded,users:rewarded.map(u=>map.get(u)).filter(Boolean)};
+      
+      const currentTarget = targetSnap?.exists()?{...(targetSnap.data()||{})}:{};
+      
+      if(!summary.reached){
+        await revokeServerDailyTargetBonuses(summary,plan,currentTarget);
+        return;
+      }
+      
+      if(currentTarget.bonusApplied===true){
+        const rw = await serverEnsureStaffTargetBonusNotifications(summary,plan,summary.bonusAmount);
+        await serverSaveTargetStatus(summary,plan,{bonusApplied:true,rewardedUsers:[...new Set([...(currentTarget.rewardedUsers||[]).map(cleanUser),...rw.map(cleanUser)].filter(Boolean))]});
+        return;
+      }
+      
+      await serverSaveTargetStatus(summary,plan,{});
+      if(summary.bonusAmount<=0)return;
+      const rw2 = await serverEnsureStaffTargetBonusNotifications(summary,plan,summary.bonusAmount);
+      await serverSaveTargetStatus(summary,plan,{bonusApplied:true,rewardedUsers:rw2});
+      await serverEnsureTargetNotification(summary,{...plan,rewardedUsers:rw2});
+    } catch(e) {
+      console.warn('serverReevaluateDailyTarget error', e);
+    }
+  }
   async function serverApplyDailyTarget() {
     if (serverTargetApplying || !currentUser) return;
     serverTargetApplying = true;
@@ -2599,15 +2651,17 @@ Masukkan PIN admin:`);
     const rowsInfo = allRows.length > rows.length ? `Tampil ${rows.length} terbaru dari ${allRows.length} data` : `${rows.length} data`;
     const withdrawalInfo = withdrawalAllRows.length > withdrawalRows.length ? `Tampil ${withdrawalRows.length} terbaru dari ${withdrawalAllRows.length} data` : `${withdrawalRows.length} data`;
     const totalColor = totalManual < 0 ? 'var(--red)' : 'var(--amber)';
-    return `<div class="card" style="padding:14px 16px;background:var(--surface);border-color:rgba(255,196,107,.16)">
-      <div style="display:flex;justify-content:space-between;align-items:flex-start;gap:10px;margin-bottom:12px">
-        <div>
-          <p class="label-xs" style="margin:0;color:var(--amber)">Bonus Manual</p>
-          <p style="font-size:11px;color:var(--text-soft);margin-top:4px">Admin bisa tambah, kurangi, atau hapus catatan bonus manual untuk Staff dan Karyawan Harian. Nilainya ikut masuk perhitungan bulan berjalan.</p>
+    return `<div style="display:flex;flex-direction:column;gap:16px;background:transparent;padding-bottom:12px">
+      <!-- Card Bonus Manual -->
+      <div class="card" style="padding:14px 16px;background:var(--surface);border:1px solid rgba(255,196,107,.25);border-top:4px solid var(--amber);box-shadow:0 4px 12px rgba(255,196,107,.05)">
+        <div style="display:flex;justify-content:space-between;align-items:flex-start;gap:10px;margin-bottom:12px">
+          <div>
+            <p class="label-xs" style="margin:0;color:var(--amber)"><i class="fas fa-plus-circle"></i> Tambah / Kurangi Bonus Manual</p>
+            <p style="font-size:11px;color:var(--text-soft);margin-top:4px">Admin bisa tambah, kurangi, atau hapus catatan bonus manual untuk Staff dan Karyawan Harian. Nilainya ikut masuk perhitungan bulan berjalan.</p>
+          </div>
+          <span class="status-pill status-ok" style="color:${totalColor};background:var(--surface-inset)">Rp ${formatRupiah(totalManual)}</span>
         </div>
-        <span class="status-pill status-ok" style="color:${totalColor}">Rp ${formatRupiah(totalManual)}</span>
-      </div>
-      <div style="display:flex;flex-direction:column;gap:9px">
+        <div style="display:flex;flex-direction:column;gap:9px">
         <div>
           <label style="font-size:10px;color:var(--text-ghost);font-weight:800;text-transform:uppercase;margin-bottom:6px;display:block">Pilih User</label>
           <select id="manual-bonus-user" class="g-input">${options || '<option value="">Belum ada staff/harian aktif</option>'}</select>
@@ -2634,15 +2688,17 @@ Masukkan PIN admin:`);
           <input id="manual-bonus-note" type="text" class="g-input" placeholder="Contoh: bonus tambahan / koreksi bonus" />
           <p style="font-size:10.5px;color:var(--text-soft);margin:0;line-height:1.35">Kurangi Bonus hanya untuk koreksi. Kalau staff ambil bonus sebagian, pakai form Ambil Bonus Sebagian di bawah.</p>
         </div>
-        <button onclick="saveManualBonus()" class="btn btn-primary" style="padding:12px;font-size:12px"><i class="fas fa-floppy-disk"></i> Simpan Bonus Manual</button>
+        <button onclick="saveManualBonus()" class="btn btn-primary" style="padding:12px;font-size:12px;margin-top:4px"><i class="fas fa-floppy-disk"></i> Simpan Bonus Manual</button>
       </div>
-      <div style="margin-top:13px;border-top:1px solid var(--border);padding-top:12px">
-        <div style="display:flex;justify-content:space-between;align-items:flex-start;gap:10px;margin-bottom:10px">
+
+      <!-- Card Ambil Bonus Sebagian -->
+      <div class="card" style="padding:14px 16px;background:var(--surface);border:1px solid rgba(16,185,129,.25);border-top:4px solid var(--green);box-shadow:0 4px 12px rgba(16,185,129,.05)">
+        <div style="display:flex;justify-content:space-between;align-items:flex-start;gap:10px;margin-bottom:12px">
           <div>
-            <p class="label-xs" style="margin:0;color:var(--green)">Ambil Bonus Sebagian</p>
+            <p class="label-xs" style="margin:0;color:var(--green)"><i class="fas fa-hand-holding-dollar"></i> Ambil Bonus Sebagian</p>
             <p style="font-size:10.5px;color:var(--text-soft);margin-top:3px;line-height:1.35">Catat uang bonus yang sudah diambil staff. Bonus terhitung tetap utuh, sisa bonus otomatis berkurang.</p>
           </div>
-          <span class="status-pill status-ok" style="color:var(--green)">Rp ${formatRupiah(withdrawalTotal)}</span>
+          <span class="status-pill status-ok" style="color:var(--green);background:var(--surface-inset)">Rp ${formatRupiah(withdrawalTotal)}</span>
         </div>
         <div style="display:flex;flex-direction:column;gap:9px">
           <select id="bonus-withdrawal-user" class="g-input">${options || '<option value="">Belum ada staff/harian aktif</option>'}</select>
@@ -2654,10 +2710,12 @@ Masukkan PIN admin:`);
           <button onclick="saveBonusWithdrawal()" class="btn btn-primary" style="padding:12px;font-size:12px;background:var(--green)"><i class="fas fa-money-bill-wave"></i> Simpan Ambil Bonus</button>
         </div>
       </div>
-      <div style="margin-top:13px;border-top:1px solid var(--border);padding-top:11px">
-        <div style="display:flex;justify-content:space-between;align-items:center;gap:8px;margin-bottom:8px">
-          <p class="label-xs" style="margin:0">Riwayat Bonus Manual Bulan Ini</p>
-          <span style="font-size:10.5px;color:var(--text-soft)">${rowsInfo}</span>
+
+      <!-- Card Riwayat Bonus Manual -->
+      <div class="card" style="padding:14px 16px;background:var(--surface);border:1px solid var(--border)">
+        <div style="display:flex;justify-content:space-between;align-items:center;gap:8px;margin-bottom:12px">
+          <p class="label-xs" style="margin:0"><i class="fas fa-clock-rotate-left" style="color:var(--amber)"></i> Riwayat Bonus Manual</p>
+          <span style="font-size:10.5px;color:var(--text-soft);background:var(--surface-inset);padding:3px 8px;border-radius:10px">${rowsInfo}</span>
         </div>
         <div style="display:flex;flex-direction:column;gap:7px;max-height:220px;overflow-y:auto;overscroll-behavior:contain;padding-right:2px">
           ${rows.length ? rows.map(b => {
@@ -2682,10 +2740,12 @@ Masukkan PIN admin:`);
           }).join('') : `<div style="font-size:11px;color:var(--text-soft);padding:9px 10px;border:1px dashed var(--border);border-radius:11px">Belum ada bonus manual bulan ini.</div>`}
         </div>
       </div>
-      <div style="margin-top:13px;border-top:1px solid var(--border);padding-top:11px">
-        <div style="display:flex;justify-content:space-between;align-items:center;gap:8px;margin-bottom:8px">
-          <p class="label-xs" style="margin:0;color:var(--green)">Riwayat Ambil Bonus Bulan Ini</p>
-          <span style="font-size:10.5px;color:var(--text-soft)">${withdrawalInfo}</span>
+
+      <!-- Card Riwayat Ambil Bonus -->
+      <div class="card" style="padding:14px 16px;background:var(--surface);border:1px solid var(--border)">
+        <div style="display:flex;justify-content:space-between;align-items:center;gap:8px;margin-bottom:12px">
+          <p class="label-xs" style="margin:0;color:var(--green)"><i class="fas fa-clock-rotate-left"></i> Riwayat Ambil Bonus</p>
+          <span style="font-size:10.5px;color:var(--text-soft);background:var(--surface-inset);padding:3px 8px;border-radius:10px">${withdrawalInfo}</span>
         </div>
         <div style="display:flex;flex-direction:column;gap:7px;max-height:220px;overflow-y:auto;overscroll-behavior:contain;padding-right:2px">
           ${withdrawalRows.length ? withdrawalRows.map(b => {
@@ -2706,13 +2766,15 @@ Masukkan PIN admin:`);
           }).join('') : `<div style="font-size:11px;color:var(--text-soft);padding:9px 10px;border:1px dashed var(--border);border-radius:11px">Belum ada ambil bonus bulan ini.</div>`}
         </div>
       </div>
-      <div style="margin-top:13px;border-top:1px solid var(--border);padding-top:11px">
-        <div style="display:flex;justify-content:space-between;align-items:center;gap:8px;margin-bottom:8px">
+
+      <!-- Card Bonus Target Otomatis -->
+      <div class="card" style="padding:14px 16px;background:var(--surface);border:1px solid var(--border)">
+        <div style="display:flex;justify-content:space-between;align-items:flex-start;gap:10px;margin-bottom:12px">
           <div>
-            <p class="label-xs" style="margin:0;color:var(--green)">Bonus Target Otomatis</p>
+            <p class="label-xs" style="margin:0;color:var(--green)"><i class="fas fa-robot"></i> Bonus Target Otomatis</p>
             <p style="font-size:10.5px;color:var(--text-soft);margin-top:3px">Dibuat otomatis saat target omzet tercapai. Hapus di sini untuk reset bonus target staff terkait.</p>
           </div>
-          <span class="status-pill status-ok" style="color:var(--green)">Rp ${formatRupiah(autoTotal)}</span>
+          <span class="status-pill status-ok" style="color:var(--green);background:var(--surface-inset)">Rp ${formatRupiah(autoTotal)}</span>
         </div>
         <div style="display:flex;flex-direction:column;gap:7px;max-height:220px;overflow-y:auto;overscroll-behavior:contain;padding-right:2px">
           ${autoRows.length ? autoRows.map(b => {
