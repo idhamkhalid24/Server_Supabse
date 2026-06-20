@@ -1611,8 +1611,20 @@ import { createClient as createSupabaseClient } from "https://cdn.jsdelivr.net/n
   function renderServerTargetScheduleList() {
     const rows = serverTargetScheduleRows().slice(0, 12);
     if (!rows.length) return `<div style="background:var(--surface);border:1px solid var(--border);border-radius:13px;padding:12px 13px"><p class="label-xs">Jadwal Target Tersimpan</p><p style="font-size:10.5px;color:var(--text-soft);margin-top:6px;line-height:1.35">Belum ada jadwal target bertanggal.</p></div>`;
-    return `<div style="background:var(--surface);border:1px solid var(--border);border-radius:13px;padding:12px 13px"><p class="label-xs">Jadwal Target Tersimpan</p><div style="display:grid;gap:7px;margin-top:8px">${rows.map((r) => { const dk = serverNormalizeTargetDateKey(r.effectiveDate || r.dateKey, ''); const rowId = String(r.id || serverTargetSettingDocId(dk)).replace(/[^a-zA-Z0-9_-]/g, ''); return `<div style="display:grid;grid-template-columns:minmax(72px,.85fr) minmax(0,1fr) minmax(0,1fr) auto;gap:7px;align-items:center;border:1px solid var(--border);border-radius:12px;padding:8px;background:var(--bg2)"><b style="font-size:11px;white-space:nowrap">${escapeHtml(formatDateLabel(dk))}</b><span style="font-size:10.5px;color:var(--text-soft);font-weight:800;white-space:nowrap;overflow:hidden;text-overflow:ellipsis">Target Rp ${formatRupiah(r.targetAmount)}</span><span style="font-size:10.5px;color:var(--text-soft);font-weight:800;white-space:nowrap;overflow:hidden;text-overflow:ellipsis">Bonus Rp ${formatRupiah(r.bonusAmount)}</span><button onclick="deleteServerTargetSchedule('${dk}','${rowId}')" class="btn btn-danger" title="Hapus target tanggal ini" style="width:34px;height:34px;min-height:34px;padding:0;border-radius:10px"><i class="fas fa-trash"></i></button></div>`; }).join('')}</div><p style="font-size:10.5px;color:var(--text-soft);margin-top:7px;line-height:1.35">Tanggal yang belum diset akan memakai target terakhir sebelumnya.</p></div>`;
+    return `<div style="background:var(--surface);border:1px solid var(--border);border-radius:13px;padding:12px 13px"><p class="label-xs">Jadwal Target Tersimpan</p><div style="display:grid;gap:7px;margin-top:8px">${rows.map((r) => { const dk = serverNormalizeTargetDateKey(r.effectiveDate || r.dateKey, ''); const rowId = String(r.id || serverTargetSettingDocId(dk)).replace(/[^a-zA-Z0-9_-]/g, ''); return `<div style="display:grid;grid-template-columns:minmax(62px,.75fr) minmax(0,1fr) minmax(0,1fr) auto auto;gap:6px;align-items:center;border:1px solid var(--border);border-radius:12px;padding:8px;background:var(--bg2)"><b style="font-size:11px;white-space:nowrap">${escapeHtml(formatDateLabel(dk))}</b><span style="font-size:10.5px;color:var(--text-soft);font-weight:800;white-space:nowrap;overflow:hidden;text-overflow:ellipsis">Target Rp ${formatRupiah(r.targetAmount)}</span><span style="font-size:10.5px;color:var(--text-soft);font-weight:800;white-space:nowrap;overflow:hidden;text-overflow:ellipsis">Bonus Rp ${formatRupiah(r.bonusAmount)}</span><button onclick="editServerTargetSchedule('${dk}')" class="btn" title="Edit target tanggal ini" style="width:34px;height:34px;min-height:34px;padding:0;border-radius:10px"><i class="fas fa-pen"></i></button><button onclick="deleteServerTargetSchedule('${dk}','${rowId}')" class="btn btn-danger" title="Hapus target tanggal ini" style="width:34px;height:34px;min-height:34px;padding:0;border-radius:10px"><i class="fas fa-trash"></i></button></div>`; }).join('')}</div><p style="font-size:10.5px;color:var(--text-soft);margin-top:7px;line-height:1.35">Tanggal yang belum diset akan memakai target terakhir sebelumnya.</p></div>`;
   }
+  window.editServerTargetSchedule = function(dk) {
+    const el = document.getElementById('serverTargetEffectiveDate');
+    if (el) el.value = dk;
+    const row = (cachedTargetSettingRows || []).find(r => serverNormalizeTargetDateKey(r.effectiveDate || r.dateKey, '') === dk);
+    if (row) {
+      const ta = document.getElementById('serverTargetAmountInput');
+      const ba = document.getElementById('serverTargetBonusInput');
+      if (ta) ta.value = formatRupiah(row.targetAmount);
+      if (ba) ba.value = formatRupiah(row.bonusAmount);
+    }
+    document.getElementById('serverTargetEffectiveDate')?.scrollIntoView?.({ behavior: 'smooth', block: 'nearest' });
+  };
   function serverTargetSettings(dateKey = toDateKey(nowDate())) {
     return serverNormalizeTargetSettings(cachedTargetSettings || {}, dateKey);
   }
@@ -1854,7 +1866,7 @@ import { createClient as createSupabaseClient } from "https://cdn.jsdelivr.net/n
     }
   }
   async function serverReevaluateDailyTarget(d) {
-    if (!state.user) return;
+    if (!currentUser) return;
     try {
       const [txSnap, attSnap, targetSnap] = await Promise.all([
         getDocsFromServer(query(collection(db,'transactions'),where('dateKey','==',d),limit(500))),
@@ -1864,22 +1876,22 @@ import { createClient as createSupabaseClient } from "https://cdn.jsdelivr.net/n
       const tx = txSnap.docs.map(x=>({id:x.id,...x.data()}));
       const att = attSnap.docs.map(x=>({id:x.id,...x.data()}));
       
-      const activeSet = new Set(realActiveUsers().filter(u=>String(u.role||'').toLowerCase()!=='admin').map(u=>cleanUser(u.username||u.id)).filter(Boolean));
-      const validTx = tx.filter(t=>!isDeleted(t)&&!isTrialRecord(t)&&String(t.dateKey||'').slice(0,10)===d&&(!activeSet.size||activeSet.has(cleanUser(t.user))));
+      const activeSet = new Set(realActiveUsers().filter(u=>String(u.role||'').toLowerCase()!=='admin').map(u=>sanitizeUsername(u.username||u.id)).filter(Boolean));
+      const validTx = tx.filter(t=>!isRecordDeleted(t)&&!isTrialRecord(t)&&String(t.dateKey||'').slice(0,10)===d&&(!activeSet.size||activeSet.has(sanitizeUsername(t.user))));
       const totalAmount = validTx.reduce((sum,t)=>sum+Number(t.amount||0),0);
       
-      const settings = serverNormalizeTargetSettings(state.targetSettingRows?.find(r=>r.effectiveDate===d||r.dateKey===d)||serverPickTargetSettings(state.targetSettingRows||[],d)||{}, d);
+      const settings = serverNormalizeTargetSettings((cachedTargetSettingRows||[]).find(r=>r.effectiveDate===d||r.dateKey===d)||serverPickTargetSettings(cachedTargetSettingRows||[],d)||{}, d);
       const targetAmount = Math.max(1,Number(settings.targetAmount||SERVER_DAILY_TARGET_AMOUNT));
       const bonusAmount = Number(settings.bonusAmount||0);
       const reached = totalAmount >= targetAmount;
       
       const summary = {dateKey:d,targetSettingDate:settings.effectiveDate||settings.dateKey||d,targetAmount,totalAmount,progressPercent:Number(((totalAmount/targetAmount)*100).toFixed(2)),reached,remainingAmount:Math.max(0,targetAmount-totalAmount),bonusAmount};
       
-      const attUsers = new Set(att.filter(a=>!isDeleted(a)&&!isTrialRecord(a)&&extractDateKey(a)===d).map(a=>cleanUser(a.user)).filter(Boolean));
-      const users = realActiveUsers().filter(u=>String(u.role||'').toLowerCase()!=='admin').map(u=>({...u,username:cleanUser(u.username||u.id)})).filter(u=>u.username);
-      const hasRismaTx = validTx.some(t=>cleanUser(t.user||t.username||t.kasir||t.createdBy||'')==='risma'&&Number(t.amount||0)>0);
+      const attUsers = new Set(att.filter(a=>!isRecordDeleted(a)&&!isTrialRecord(a)&&extractDateKey(a)===d).map(a=>sanitizeUsername(a.user)).filter(Boolean));
+      const users = realActiveUsers().filter(u=>String(u.role||'').toLowerCase()!=='admin').map(u=>({...u,username:sanitizeUsername(u.username||u.id)})).filter(u=>u.username);
+      const hasRismaTx = validTx.some(t=>sanitizeUsername(t.user||t.username||t.kasir||t.createdBy||'')==='risma'&&Number(t.amount||0)>0);
       const active = users.map(u=>u.username);
-      const rewarded = users.filter(u=>u.username==='risma'?hasRismaTx:(!isDaily(u)&&attUsers.has(u.username))).map(u=>u.username);
+      const rewarded = users.filter(u=>u.username==='risma'?hasRismaTx:(!isDailyEmployee(u)&&attUsers.has(u.username))).map(u=>u.username);
       const map = new Map(users.map(u=>[u.username,u]));
       const plan = {activeUsers:active,rewardedUsers:rewarded,users:rewarded.map(u=>map.get(u)).filter(Boolean)};
       
@@ -1890,13 +1902,28 @@ import { createClient as createSupabaseClient } from "https://cdn.jsdelivr.net/n
         return;
       }
       
-      if(currentTarget.bonusApplied===true){
+      // Cek apakah ada user yang harusnya dapat bonus tapi rewardnya sudah di-revoke/deleted
+      // Fix bug 'harus edit 2x': saat bonusApplied=true tapi reward sudah dicabut, harus grant ulang
+      let needsRegrant = false;
+      if(currentTarget.bonusApplied===true && summary.bonusAmount>0 && plan.users.length>0){
+        for(const user of plan.users){
+          const username=sanitizeUsername(user?.username||user?.id||'');
+          if(!username) continue;
+          const bonusId=serverTargetBonusId(d,username);
+          const snap=await getDocFromServer(doc(db,'manualBonuses',bonusId)).catch(()=>null);
+          const data=snap?.exists()?snap.data()||{}:null;
+          if(!data||isRecordDeleted(data)){needsRegrant=true;break;} // bonus sudah deleted → perlu grant ulang
+        }
+      }
+      
+      if(currentTarget.bonusApplied===true && !needsRegrant){
         const rw = await serverEnsureStaffTargetBonusNotifications(summary,plan,summary.bonusAmount);
-        await serverSaveTargetStatus(summary,plan,{bonusApplied:true,rewardedUsers:[...new Set([...(currentTarget.rewardedUsers||[]).map(cleanUser),...rw.map(cleanUser)].filter(Boolean))]});
+        await serverSaveTargetStatus(summary,plan,{bonusApplied:true,rewardedUsers:[...new Set([...(currentTarget.rewardedUsers||[]).map(sanitizeUsername),...rw.map(sanitizeUsername)].filter(Boolean))]});
         return;
       }
       
-      await serverSaveTargetStatus(summary,plan,{});
+      // Grant (atau re-grant setelah revoke)
+      await serverSaveTargetStatus(summary,plan,{bonusApplied:false});
       if(summary.bonusAmount<=0)return;
       const rw2 = await serverEnsureStaffTargetBonusNotifications(summary,plan,summary.bonusAmount);
       await serverSaveTargetStatus(summary,plan,{bonusApplied:true,rewardedUsers:rw2});
@@ -2062,11 +2089,14 @@ import { createClient as createSupabaseClient } from "https://cdn.jsdelivr.net/n
       await setDoc(doc(db, SERVER_TARGET_SETTINGS_TABLE, scheduleId), payload, { merge: true });
       if (effectiveDate === today) await setDoc(doc(db, SERVER_TARGET_SETTINGS_TABLE, 'daily_target'), { ...payload, id: 'daily_target' }, { merge: true });
       cachedDailyTarget = null;
-      await serverApplyDailyTarget();
+      const idx = (cachedTargetSettingRows||[]).findIndex(r=>r.id===scheduleId);
+      if (idx>=0) cachedTargetSettingRows[idx] = payload;
+      else cachedTargetSettingRows = [...(cachedTargetSettingRows||[]), payload];
+      await serverReevaluateDailyTarget(effectiveDate);
       adminDashboardPanelsHash = '';
       renderAdminDashboardPanels();
       closeServerDailyTargetSettingsModal();
-      showToast(future ? `Target dijadwalkan untuk ${effectiveDate}` : 'Target dan bonus disimpan');
+      showToast(future ? `Target dijadwalkan untuk ${effectiveDate}` : 'Target dan bonus dievaluasi & disimpan');
     } catch (e) {
       showToast('Gagal simpan target: ' + (e.code || e.message || 'cek koneksi'), true);
     }
@@ -2114,11 +2144,11 @@ import { createClient as createSupabaseClient } from "https://cdn.jsdelivr.net/n
         await deleteDoc(doc(db, SERVER_TARGET_SETTINGS_TABLE, 'daily_target')).catch(() => {});
         cachedTargetSettings = {};
       }
-      await serverApplyDailyTarget();
+      await serverReevaluateDailyTarget(effectiveDate);
       adminDashboardPanelsHash = '';
       renderAdminDashboardPanels();
       closeServerDailyTargetSettingsModal();
-      showToast(`Target tanggal ${effectiveDate} dihapus`);
+      showToast(`Target tanggal ${effectiveDate} dihapus dan dievaluasi ulang`);
     } catch (e) {
       showToast('Gagal hapus target: ' + (e.code || e.message || 'cek koneksi'), true);
     }
