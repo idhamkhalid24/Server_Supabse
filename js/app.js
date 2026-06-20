@@ -519,12 +519,13 @@ import { createClient as createSupabaseClient } from "https://cdn.jsdelivr.net/n
   let attendanceReady = false, isBusy = false, auditLogLimit = 10, recycleBinLimit = 20, recycleSearch = '', recycleUserFilter = 'all', historyDisplayLimit = 30, inactiveUserLimit = 30, adminMoreOpen = false;
   let attendancePageUserFilter = 'all', attendancePageDateFilter = toDateKey(nowDate()), attendancePageShowDeleted = false, attendancePageLimit = 30;
   let adminProCurrentPageKey = '';
-  const TX_SYNC_LIMIT_ADMIN = 800, ATT_SYNC_LIMIT_ADMIN = 800, AUDIT_SYNC_LIMIT = 40, CLOSING_SYNC_LIMIT = 120, MANUAL_BONUS_SYNC_LIMIT = 250, HISTORY_PAGE_STEP = 30, INACTIVE_USER_STEP = 30;
+  const TX_SYNC_LIMIT_ADMIN = 3800, ATT_SYNC_LIMIT_ADMIN = 1200, AUDIT_SYNC_LIMIT = 40, CLOSING_SYNC_LIMIT = 180, MANUAL_BONUS_SYNC_LIMIT = 500, HISTORY_PAGE_STEP = 30, INACTIVE_USER_STEP = 30;
   const ATTENDANCE_PAGE_STEP = 30;
   const DEFAULT_CLOSING_DEADLINE_HOUR = 18, DEFAULT_CLOSING_DEADLINE_MINUTE = 0, DEFAULT_CLOSING_DEADLINE_TIME = '18:00', DEFAULT_CLOSING_BONUS_PER_MINUTE = 100, DEFAULT_TRANSACTION_BONUS_RATE = 0.015;
   const RISMA_MANUAL_CLOSING_DOC_ID = '__risma_manual_closing';
   const RISMA_MANUAL_CLOSING_COLLECTION = 'closings';
   const STAFF_UNLOCK_TABLE = 'staff_leave_requests';
+  const BONUS_WITHDRAWAL_TYPE = 'bonus_withdrawal';
   let appSwipeStartX = 0, appSwipeStartY = 0, appSwipeStartT = 0;
   let adminClosingPanelHash = '', adminDashboardPanelsHash = '';
   let clockInInFlight = false;
@@ -1473,6 +1474,19 @@ import { createClient as createSupabaseClient } from "https://cdn.jsdelivr.net/n
       || String(row.type || '') === 'daily_target_bonus'
       || String(row.id || '').startsWith('targetbonus_');
   }
+  function isBonusWithdrawalRow(row = {}) {
+    const type = String(row.type || row.bonusType || '').toLowerCase();
+    const action = String(row.action || row.bonusAction || '').toLowerCase();
+    const source = String(row.source || '').toLowerCase();
+    return type === BONUS_WITHDRAWAL_TYPE
+      || action === 'withdraw'
+      || source === BONUS_WITHDRAWAL_TYPE
+      || String(row.id || '').startsWith('bonuswd_');
+  }
+  function bonusWithdrawalAmount(row = {}) {
+    const raw = Number(row.withdrawalAmount ?? row.paidAmount ?? row.amount ?? 0);
+    return Number.isFinite(raw) ? Math.abs(raw) : 0;
+  }
   async function resetServerTargetAutoBonusAfterDelete(row = {}) {
     if (!isTargetAutoBonusRow(row)) return;
     const username = sanitizeUsername(row.user || row.targetUsername || row.username || '');
@@ -1774,6 +1788,9 @@ import { createClient as createSupabaseClient } from "https://cdn.jsdelivr.net/n
         const notifyResult = await notifyStaffManualBonusFromServer({ id: bonusId, docId: bonusId, ...payload }, user);
         staffNotificationSent = !!notifyResult && notifyResult.ok !== false;
       } else {
+        const repair = { targetUsername: username, dateKey: summary.dateKey, monthKey: summary.dateKey.slice(0, 7), type: 'daily_target_bonus', source: 'daily_target', action: 'add', deleted: false, amount };
+        await setDoc(doc(db, 'manualBonuses', bonusId), repair, { merge: true }).catch(() => {});
+        upsertManualBonusRecord({ id: bonusId, ...existingData, ...repair });
         staffNotificationSent = await serverEnsureStaffTargetBonusNotification(summary, user, amount);
       }
       rewarded.push(username);
@@ -2120,11 +2137,19 @@ import { createClient as createSupabaseClient } from "https://cdn.jsdelivr.net/n
   function extractDateKey(item) {
     if (!item) return '';
     if (item.dateKey) return String(item.dateKey).slice(0, 10);
+    const idDate = String(item.id || item.docId || item._docId || '').match(/(\d{4}-\d{2}-\d{2})/);
+    if (idDate) return idDate[1];
     if (typeof item.time === 'string' && item.time.length >= 10) return item.time.slice(0, 10);
     if (typeof item.createdAt === 'string' && item.createdAt.length >= 10) return item.createdAt.slice(0, 10);
     if (item.createdAt?.toDate) return toDateKey(item.createdAt.toDate());
     if (item.createdAtMs) return toDateKey(new Date(item.createdAtMs));
     return '';
+  }
+  function extractMonthKey(item) {
+    const raw = String(item?.monthKey || item?.bonusMonth || item?.month || '').slice(0, 7);
+    if (/^\d{4}-\d{2}$/.test(raw)) return raw;
+    const dk = extractDateKey(item);
+    return dk ? dk.slice(0, 7) : '';
   }
   function getRecordTimeMs(item) {
     if (!item) return 0;
@@ -2566,9 +2591,13 @@ Masukkan PIN admin:`);
     const allRows = monthBonusRows.filter(b => !isTargetAutoBonusRow(b));
     const autoRows = monthBonusRows.filter(isTargetAutoBonusRow).slice(0, 30);
     const autoTotal = autoRows.reduce((sum, b) => sum + Number(b.amount || 0), 0);
+    const withdrawalAllRows = getMonthlyBonusWithdrawals(null, month);
+    const withdrawalRows = withdrawalAllRows.slice(0, 30);
+    const withdrawalTotal = withdrawalAllRows.reduce((sum, b) => sum + bonusWithdrawalAmount(b), 0);
     const rows = allRows.slice(0, 30);
     const totalManual = allRows.reduce((sum, b) => sum + Number(b.amount || 0), 0);
     const rowsInfo = allRows.length > rows.length ? `Tampil ${rows.length} terbaru dari ${allRows.length} data` : `${rows.length} data`;
+    const withdrawalInfo = withdrawalAllRows.length > withdrawalRows.length ? `Tampil ${withdrawalRows.length} terbaru dari ${withdrawalAllRows.length} data` : `${withdrawalRows.length} data`;
     const totalColor = totalManual < 0 ? 'var(--red)' : 'var(--amber)';
     return `<div class="card" style="padding:14px 16px;background:var(--surface);border-color:rgba(255,196,107,.16)">
       <div style="display:flex;justify-content:space-between;align-items:flex-start;gap:10px;margin-bottom:12px">
@@ -2603,8 +2632,27 @@ Masukkan PIN admin:`);
         <div>
           <label style="font-size:10px;color:var(--text-ghost);font-weight:800;text-transform:uppercase;margin-bottom:6px;display:block">Keterangan</label>
           <input id="manual-bonus-note" type="text" class="g-input" placeholder="Contoh: bonus tambahan / koreksi bonus" />
+          <p style="font-size:10.5px;color:var(--text-soft);margin:0;line-height:1.35">Kurangi Bonus hanya untuk koreksi. Kalau staff ambil bonus sebagian, pakai form Ambil Bonus Sebagian di bawah.</p>
         </div>
         <button onclick="saveManualBonus()" class="btn btn-primary" style="padding:12px;font-size:12px"><i class="fas fa-floppy-disk"></i> Simpan Bonus Manual</button>
+      </div>
+      <div style="margin-top:13px;border-top:1px solid var(--border);padding-top:12px">
+        <div style="display:flex;justify-content:space-between;align-items:flex-start;gap:10px;margin-bottom:10px">
+          <div>
+            <p class="label-xs" style="margin:0;color:var(--green)">Ambil Bonus Sebagian</p>
+            <p style="font-size:10.5px;color:var(--text-soft);margin-top:3px;line-height:1.35">Catat uang bonus yang sudah diambil staff. Bonus terhitung tetap utuh, sisa bonus otomatis berkurang.</p>
+          </div>
+          <span class="status-pill status-ok" style="color:var(--green)">Rp ${formatRupiah(withdrawalTotal)}</span>
+        </div>
+        <div style="display:flex;flex-direction:column;gap:9px">
+          <select id="bonus-withdrawal-user" class="g-input">${options || '<option value="">Belum ada staff/harian aktif</option>'}</select>
+          <div style="display:grid;grid-template-columns:1fr 1fr;gap:8px">
+            <input id="bonus-withdrawal-month" type="month" class="g-input" value="${month}" />
+            <input id="bonus-withdrawal-amount" type="tel" inputmode="numeric" pattern="[0-9]*" class="g-input" placeholder="Nominal diambil" data-numeric="0" oninput="formatMoneyInputElement(this)" />
+          </div>
+          <input id="bonus-withdrawal-note" type="text" class="g-input" placeholder="Catatan, contoh: ambil dulu sebagian" />
+          <button onclick="saveBonusWithdrawal()" class="btn btn-primary" style="padding:12px;font-size:12px;background:var(--green)"><i class="fas fa-money-bill-wave"></i> Simpan Ambil Bonus</button>
+        </div>
       </div>
       <div style="margin-top:13px;border-top:1px solid var(--border);padding-top:11px">
         <div style="display:flex;justify-content:space-between;align-items:center;gap:8px;margin-bottom:8px">
@@ -2636,6 +2684,30 @@ Masukkan PIN admin:`);
       </div>
       <div style="margin-top:13px;border-top:1px solid var(--border);padding-top:11px">
         <div style="display:flex;justify-content:space-between;align-items:center;gap:8px;margin-bottom:8px">
+          <p class="label-xs" style="margin:0;color:var(--green)">Riwayat Ambil Bonus Bulan Ini</p>
+          <span style="font-size:10.5px;color:var(--text-soft)">${withdrawalInfo}</span>
+        </div>
+        <div style="display:flex;flex-direction:column;gap:7px;max-height:220px;overflow-y:auto;overscroll-behavior:contain;padding-right:2px">
+          ${withdrawalRows.length ? withdrawalRows.map(b => {
+            const amount = bonusWithdrawalAmount(b);
+            const rowId = escapeHtml(b.id || '');
+            const roleLabel = getRoleDisplayName(b.userRole || b.role || getReportUserRole(b.user, 'staff'));
+            return `<div style="display:flex;justify-content:space-between;gap:8px;padding:9px 10px;border:1px solid var(--border);border-radius:11px;background:var(--bg2);align-items:center">
+              <div style="min-width:0;flex:1">
+                <div style="font-size:12px;font-weight:800;white-space:nowrap;overflow:hidden;text-overflow:ellipsis">${escapeHtml(b.name || b.user || '-')}</div>
+                <div style="font-size:10px;color:var(--text-soft);margin-top:3px;white-space:nowrap;overflow:hidden;text-overflow:ellipsis">${escapeHtml(b.note || 'Ambil bonus sebagian')} - ${escapeHtml(b.monthKey || '-')} - ${escapeHtml(roleLabel)}</div>
+                <div style="font-size:9.5px;color:var(--green);font-weight:800;margin-top:4px">Sudah diambil</div>
+              </div>
+              <div style="display:flex;align-items:center;gap:7px;flex-shrink:0">
+                <strong style="font-family:var(--num-font);font-size:13px;color:var(--green)">- Rp ${formatRupiah(amount)}</strong>
+                ${rowId ? `<button onclick="deleteBonusWithdrawal('${rowId}')" class="btn btn-danger" title="Hapus riwayat ambil bonus" style="width:30px;height:30px;padding:0;border-radius:9px"><i class="fas fa-trash"></i></button>` : ''}
+              </div>
+            </div>`;
+          }).join('') : `<div style="font-size:11px;color:var(--text-soft);padding:9px 10px;border:1px dashed var(--border);border-radius:11px">Belum ada ambil bonus bulan ini.</div>`}
+        </div>
+      </div>
+      <div style="margin-top:13px;border-top:1px solid var(--border);padding-top:11px">
+        <div style="display:flex;justify-content:space-between;align-items:center;gap:8px;margin-bottom:8px">
           <div>
             <p class="label-xs" style="margin:0;color:var(--green)">Bonus Target Otomatis</p>
             <p style="font-size:10.5px;color:var(--text-soft);margin-top:3px">Dibuat otomatis saat target omzet tercapai. Hapus di sini untuk reset bonus target staff terkait.</p>
@@ -2649,7 +2721,7 @@ Masukkan PIN admin:`);
             return `<div style="display:flex;justify-content:space-between;gap:8px;padding:9px 10px;border:1px solid var(--border);border-radius:11px;background:var(--bg2);align-items:center">
               <div style="min-width:0;flex:1">
                 <div style="font-size:12px;font-weight:800;white-space:nowrap;overflow:hidden;text-overflow:ellipsis">${escapeHtml(b.name || b.user || '-')}</div>
-                <div style="font-size:10px;color:var(--text-soft);margin-top:3px;white-space:nowrap;overflow:hidden;text-overflow:ellipsis">${escapeHtml(b.note || 'Bonus target omzet harian tercapai')} Â· ${escapeHtml(b.dateKey || '-')}</div>
+                <div style="font-size:10px;color:var(--text-soft);margin-top:3px;white-space:nowrap;overflow:hidden;text-overflow:ellipsis">${escapeHtml(b.note || 'Bonus target omzet harian tercapai')} - ${escapeHtml(b.dateKey || '-')}</div>
                 <div style="font-size:9.5px;color:var(--green);font-weight:800;margin-top:4px">Bonus otomatis target</div>
               </div>
               <div style="display:flex;align-items:center;gap:7px;flex-shrink:0">
@@ -2779,6 +2851,123 @@ Masukkan PIN admin:`);
       showToast('Gagal hapus bonus manual: ' + (e.code || e.message || 'cek Supabase'), true);
     }
     setLoading(false);
+  }
+
+  function getUserBonusRemainingForMonth(username, month = toMonthKey(nowDate())) {
+    const safeUser = sanitizeUsername(username);
+    if (!safeUser) return { earned: 0, withdrawn: 0, remaining: 0 };
+    const earned = Number(getBonusBreakdown(cachedTransactions || [], safeUser, month).totalBonus || 0);
+    const withdrawn = getMonthlyBonusWithdrawn(safeUser, month);
+    return { earned, withdrawn, remaining: Math.max(0, earned - withdrawn) };
+  }
+
+  async function saveBonusWithdrawal() {
+    if (!isAdmin()) return showToast('Hanya admin!', true);
+    if (isBusy || manualBonusSaveInFlight) return showToast('Ambil bonus sedang diproses...', true);
+    manualBonusSaveInFlight = true;
+    let loadingShown = false;
+    try {
+      const username = sanitizeUsername($('bonus-withdrawal-user')?.value || '');
+      const user = getUserByUsername(username);
+      const amountRaw = $('bonus-withdrawal-amount')?.getAttribute('data-numeric') || String($('bonus-withdrawal-amount')?.value || '').replace(/\D/g, '');
+      const amount = parseInt(amountRaw || '0', 10);
+      const monthKey = String($('bonus-withdrawal-month')?.value || toMonthKey(nowDate())).slice(0, 7);
+      const note = String($('bonus-withdrawal-note')?.value || '').trim() || 'Ambil bonus sebagian';
+      if (!username || !user) return showToast('Pilih user dulu!', true);
+      if (!isManualBonusUser(user)) return showToast('Ambil bonus hanya untuk Staff/Karyawan Harian aktif.', true);
+      if (!amount || amount <= 0) return showToast('Nominal ambil bonus tidak valid!', true);
+      if (!/^\d{4}-\d{2}$/.test(monthKey)) return showToast('Bulan bonus tidak valid!', true);
+      const role = normalizeRole(user.role || 'staff');
+      const trialFlags = getTrialFlags(user);
+      const balance = getUserBonusRemainingForMonth(username, monthKey);
+      if (balance.earned > 0 && amount > balance.remaining) {
+        const ok = confirm(`Nominal ambil bonus melebihi sisa yang terbaca.\n\nBonus terhitung: Rp ${formatRupiah(balance.earned)}\nSudah diambil: Rp ${formatRupiah(balance.withdrawn)}\nSisa: Rp ${formatRupiah(balance.remaining)}\nMau tetap simpan?`);
+        if (!ok) return;
+      }
+      const pin = await askPin(`Catat ambil bonus untuk ${user.name || username}?\nRole: ${getRoleDisplayName(role)}\nNominal diambil: Rp ${formatRupiah(amount)}\nBulan: ${monthKey}\nSisa terbaca: Rp ${formatRupiah(balance.remaining)}\n\nMasukkan PIN admin:`);
+      if (!pin) return;
+      if (!(await requireCurrentAdminPin(pin))) return;
+
+      const now = nowDate();
+      const nowMs = Date.now();
+      const clientRequestId = `bw_${sanitizeUsername(currentUser.username)}_${nowMs}_${Math.random().toString(36).slice(2, 8)}`;
+      const payload = {
+        user: username,
+        name: user.name || username,
+        userRole: role,
+        role,
+        bonusGroup: role,
+        amount: -amount,
+        withdrawalAmount: amount,
+        paidAmount: amount,
+        note,
+        monthKey,
+        dateKey: toDateKey(now),
+        time: dateToTimeInput(now),
+        type: BONUS_WITHDRAWAL_TYPE,
+        action: 'withdraw',
+        source: BONUS_WITHDRAWAL_TYPE,
+        ...trialFlags,
+        deleted: false,
+        createdAt: serverTimestamp(),
+        createdAtMs: nowMs,
+        createdBy: currentUser.username,
+        createdByName: currentUser.name,
+        clientRequestId
+      };
+      setLoading(true);
+      loadingShown = true;
+      const ref = await addDoc(collection(db, 'manualBonuses'), payload);
+      const savedWithdrawal = { id: ref.id, ...payload };
+      upsertManualBonusRecord(savedWithdrawal);
+      await logAudit('bonus_withdrawal_add', { id: ref.id, user: username, name: user.name || username, role, amount, monthKey, note });
+      const amountInput = $('bonus-withdrawal-amount');
+      const noteInput = $('bonus-withdrawal-note');
+      if (amountInput) { amountInput.value = ''; amountInput.setAttribute('data-numeric', '0'); }
+      if (noteInput) noteInput.value = '';
+      showToast(`✓ Ambil bonus ${user.name || username}: Rp ${formatRupiah(amount)}`);
+      await refreshCurrentPage();
+    } catch (e) {
+      console.error(e);
+      showToast('Gagal simpan ambil bonus: ' + (e.code || e.message || 'cek Supabase'), true);
+    } finally {
+      if (loadingShown) setLoading(false);
+      manualBonusSaveInFlight = false;
+    }
+  }
+
+  async function deleteBonusWithdrawal(id) {
+    if (!isAdmin()) return showToast('Hanya admin!', true);
+    if (isBusy) return showToast('Tunggu proses selesai', true);
+    const bonusId = String(id || '').trim();
+    if (!bonusId) return showToast('Data ambil bonus tidak valid!', true);
+    const item = (cachedManualBonuses || []).find(b => String(b.id) === bonusId);
+    if (!item || !isBonusWithdrawalRow(item)) return showToast('Data ambil bonus tidak ditemukan!', true);
+    const amount = bonusWithdrawalAmount(item);
+    const pin = await askPin(`Hapus riwayat ambil bonus ${item.name || item.user || ''}?\nNilai: Rp ${formatRupiah(amount)}\nBulan: ${item.monthKey || '-'}\n\nMasukkan PIN admin:`);
+    if (!pin) return;
+    if (!(await requireCurrentAdminPin(pin))) return;
+    if (!confirm('Riwayat ambil bonus ini akan dihapus, sisa bonus akan naik lagi. Lanjutkan?')) return;
+    setLoading(true);
+    try {
+      const patch = {
+        deleted: true,
+        deletedAt: serverTimestamp(),
+        deletedAtMs: Date.now(),
+        deletedBy: currentUser.username,
+        deletedByName: currentUser.name
+      };
+      await setDoc(doc(db, 'manualBonuses', bonusId), patch, { merge: true });
+      cachedManualBonuses = dedupeManualBonusRecords(cachedManualBonuses.map(b => String(b.id) === bonusId ? { ...b, ...patch } : b));
+      await logAudit('bonus_withdrawal_delete', { id: bonusId, user: item.user || '', name: item.name || '', amount, monthKey: item.monthKey || '', note: item.note || '' });
+      showToast('✓ Riwayat ambil bonus dihapus');
+      await refreshCurrentPage();
+    } catch (e) {
+      console.error(e);
+      showToast('Gagal hapus ambil bonus: ' + (e.code || e.message || 'cek Supabase'), true);
+    } finally {
+      setLoading(false);
+    }
   }
 
   function getClosingCanceledUsersMap(closing) {
@@ -3070,10 +3259,11 @@ Masukkan PIN admin:`);
     const target = username && username !== 'all' ? sanitizeUsername(username) : null;
     return sortByCreatedDesc(dedupeManualBonusRecords(cachedManualBonuses || []).filter(b => {
       if (!b || b.deleted === true || b.deleted === 'true') return false;
+      if (isBonusWithdrawalRow(b)) return false;
       if (isTrialRecord(b)) return false;
       const amount = Number(b.amount || 0);
       if (!Number.isFinite(amount) || amount === 0) return false;
-      const bMonth = String(b.monthKey || extractDateKey(b).slice(0, 7) || '');
+      const bMonth = extractMonthKey(b);
       if (month && bMonth !== month) return false;
       if (target && sanitizeUsername(b.user) !== target) return false;
       return true;
@@ -3082,6 +3272,23 @@ Masukkan PIN admin:`);
 
   function getMonthlyManualBonus(username = null, month = toMonthKey(nowDate())) {
     return getMonthlyManualBonuses(username, month).reduce((sum, b) => sum + Number(b.amount || 0), 0);
+  }
+
+  function getMonthlyBonusWithdrawals(username = null, month = toMonthKey(nowDate())) {
+    const target = username && username !== 'all' ? sanitizeUsername(username) : null;
+    return sortByCreatedDesc(dedupeManualBonusRecords(cachedManualBonuses || []).filter(b => {
+      if (!b || b.deleted === true || b.deleted === 'true') return false;
+      if (!isBonusWithdrawalRow(b)) return false;
+      if (isTrialRecord(b)) return false;
+      const bMonth = extractMonthKey(b);
+      if (month && bMonth !== month) return false;
+      if (target && sanitizeUsername(b.user) !== target) return false;
+      return bonusWithdrawalAmount(b) > 0;
+    }));
+  }
+
+  function getMonthlyBonusWithdrawn(username = null, month = toMonthKey(nowDate())) {
+    return getMonthlyBonusWithdrawals(username, month).reduce((sum, b) => sum + bonusWithdrawalAmount(b), 0);
   }
 
   function normalizeBonusPeriod(period = toMonthKey(nowDate())) {
@@ -3102,7 +3309,7 @@ Masukkan PIN admin:`);
   function recordMatchesBonusPeriod(record, period = toMonthKey(nowDate())) {
     const p = normalizeBonusPeriod(period);
     const dateKey = String(record?.dateKey || extractDateKey(record) || '').slice(0, 10);
-    const monthKey = String(record?.monthKey || (dateKey ? dateKey.slice(0, 7) : '') || '').slice(0, 7);
+    const monthKey = extractMonthKey(record) || (dateKey ? dateKey.slice(0, 7) : '');
     if (p.type === 'daily') return dateKey === p.dateKey;
     if (p.type === 'yearly') return (monthKey || dateKey).startsWith(p.year);
     return monthKey === p.monthKey || (dateKey && dateKey.startsWith(p.monthKey));
@@ -3116,6 +3323,7 @@ Masukkan PIN admin:`);
     const target = username && username !== 'all' ? sanitizeUsername(username) : null;
     return sortByCreatedDesc(dedupeManualBonusRecords(cachedManualBonuses || []).filter(b => {
       if (!b || b.deleted === true || b.deleted === 'true') return false;
+      if (isBonusWithdrawalRow(b)) return false;
       if (isTrialRecord(b)) return false;
       const amount = Number(b.amount || 0);
       if (!Number.isFinite(amount) || amount === 0) return false;
@@ -3126,6 +3334,22 @@ Masukkan PIN admin:`);
   }
   function getPeriodManualBonus(username = null, period = toMonthKey(nowDate())) {
     return getPeriodManualBonuses(username, period).reduce((sum, b) => sum + Number(b.amount || 0), 0);
+  }
+
+  function getPeriodBonusWithdrawals(username = null, period = toMonthKey(nowDate())) {
+    const target = username && username !== 'all' ? sanitizeUsername(username) : null;
+    return sortByCreatedDesc(dedupeManualBonusRecords(cachedManualBonuses || []).filter(b => {
+      if (!b || b.deleted === true || b.deleted === 'true') return false;
+      if (!isBonusWithdrawalRow(b)) return false;
+      if (isTrialRecord(b)) return false;
+      if (!recordMatchesBonusPeriod(b, period)) return false;
+      if (target && sanitizeUsername(b.user) !== target) return false;
+      return bonusWithdrawalAmount(b) > 0;
+    }));
+  }
+
+  function getPeriodBonusWithdrawn(username = null, period = toMonthKey(nowDate())) {
+    return getPeriodBonusWithdrawals(username, period).reduce((sum, b) => sum + bonusWithdrawalAmount(b), 0);
   }
 
   function getBonusBreakdown(transactions, username = null, period = toMonthKey(nowDate())) {
@@ -3142,7 +3366,9 @@ Masukkan PIN admin:`);
     const totalBonus = targetIsDaily
       ? dailySalary + manualBonus
       : staffTransactionBonus + closingBonus + manualBonus + (target ? 0 : dailySalary);
-    return { trxBonus, closingBonus, manualBonus, dailySalary, staffTransactionBonus, totalBonus };
+    const bonusWithdrawn = getPeriodBonusWithdrawn(username, period);
+    const remainingBonus = Math.max(0, totalBonus - bonusWithdrawn);
+    return { trxBonus, closingBonus, manualBonus, dailySalary, staffTransactionBonus, totalBonus, bonusWithdrawn, remainingBonus };
   }
 
   function getMonthlyClosingCount(username = null, month = toMonthKey(nowDate())) {
@@ -5172,10 +5398,14 @@ ${lockedByGlobal ? 'Hanya user ini yang dibuka dari closing global. Bonus closin
       forceCashFisikNextRender = false;
       await updateHomeCashFisikCard(today, shouldForceCash);
     }
-    if ($('total-bonus')) $('total-bonus').innerText = `Rp ${formatRupiah(bonusBreakdown.totalBonus)}`;
+    if ($('total-bonus')) $('total-bonus').innerText = `Rp ${formatRupiah(bonusBreakdown.remainingBonus)}`;
     if ($('bonus-text')) {
       $('bonus-text').style.display = '';
-      $('bonus-text').innerText = 'Bonus ini sudah termasuk total bonus keseluruhan';
+      if (bonusBreakdown.bonusWithdrawn > 0) {
+        $('bonus-text').innerText = `Sisa bonus (Total kotor Rp ${formatRupiah(bonusBreakdown.totalBonus)})`;
+      } else {
+        $('bonus-text').innerText = 'Bonus ini sudah termasuk total bonus keseluruhan';
+      }
     }
     if ($('month-omzet')) $('month-omzet').innerText = `Rp ${formatRupiah(omzetBulanan)}`;
     if ($('today-bonus-total')) $('today-bonus-total').innerText = `Rp ${formatRupiah(todayBonusBreakdown.totalBonus)}`;
@@ -5344,6 +5574,7 @@ ${lockedByGlobal ? 'Hanya user ini yang dibuka dari closing global. Bonus closin
     const attendance = sourceAttendance.filter(a => String(extractDateKey(a) || '').startsWith(meta.key));
     const closings = getMonthlyClosingRecords(meta.key).filter(c => !targetUser || getClosingBonusValue(c, targetUser) > 0 || sanitizeUsername(c.user) === targetUser);
     const manualBonuses = getMonthlyManualBonuses(targetUser, meta.key);
+    const bonusWithdrawals = getMonthlyBonusWithdrawals(targetUser, meta.key);
     const dayKeys = getMonthDayKeys(meta.key);
 
     const userMap = new Map();
@@ -5364,6 +5595,8 @@ ${lockedByGlobal ? 'Hanya user ini yang dibuka dari closing global. Bonus closin
           trxBonus: 0,
           closingBonus: 0,
           manualBonus: 0,
+          bonusWithdrawn: 0,
+          remainingBonus: 0,
           dailySalary: 0,
           totalBonus: 0,
           avgTransaction: 0
@@ -5397,6 +5630,7 @@ ${lockedByGlobal ? 'Hanya user ini yang dibuka dari closing global. Bonus closin
     });
 
     manualBonuses.forEach(b => ensureUser(b.user, b.name, b.userRole || b.role || 'staff'));
+    bonusWithdrawals.forEach(b => ensureUser(b.user, b.name, b.userRole || b.role || 'staff'));
     closings.forEach(c => {
       const byUser = c.bonusByUser || {};
       Object.keys(byUser).forEach(u => ensureUser(u, getReportUserName(u), 'staff'));
@@ -5414,6 +5648,8 @@ ${lockedByGlobal ? 'Hanya user ini yang dibuka dari closing global. Bonus closin
       row.closingBonus = isDailyRole(role) ? 0 : getMonthlyClosingBonus(row.user, meta.key);
       row.manualBonus = getMonthlyManualBonus(row.user, meta.key);
       row.totalBonus = row.trxBonus + row.closingBonus + row.manualBonus + row.dailySalary;
+      row.bonusWithdrawn = getMonthlyBonusWithdrawn(row.user, meta.key);
+      row.remainingBonus = Math.max(0, row.totalBonus - row.bonusWithdrawn);
       row.hariTransaksi = row.hariTransaksiSet.size;
       row.hadir = row.hadirSet.size;
       row.avgTransaction = row.transaksi ? Math.round(row.omzet / row.transaksi) : 0;
@@ -5449,6 +5685,8 @@ ${lockedByGlobal ? 'Hanya user ini yang dibuka dari closing global. Bonus closin
     const staffTotalBonus = staffTrxBonus + closingBonus + staffManualBonus;
     const dailyTotalSalary = dailySalary + dailyManualBonus;
     const totalBonus = staffTotalBonus + dailyTotalSalary;
+    const bonusWithdrawn = userRows.reduce((sum, u) => sum + Number(u.bonusWithdrawn || 0), 0);
+    const remainingBonus = Math.max(0, totalBonus - bonusWithdrawn);
 
     return {
       meta,
@@ -5457,6 +5695,7 @@ ${lockedByGlobal ? 'Hanya user ini yang dibuka dari closing global. Bonus closin
       attendance,
       closings,
       manualBonuses,
+      bonusWithdrawals,
       userRows,
       dailyRows,
       totals: {
@@ -5476,6 +5715,8 @@ ${lockedByGlobal ? 'Hanya user ini yang dibuka dari closing global. Bonus closin
         staffTotalBonus,
         dailyTotalSalary,
         totalBonus,
+        bonusWithdrawn,
+        remainingBonus,
         closingCount: closings.length,
         bestDay,
         topTransaction
@@ -5509,6 +5750,8 @@ ${lockedByGlobal ? 'Hanya user ini yang dibuka dari closing global. Bonus closin
     const staffTotal = Number(totals.staffTotalBonus ?? (Number(totals.staffTrxBonus || 0) + Number(totals.closingBonus || 0) + Number(totals.manualBonus || 0)));
     const dailyTotal = Number(totals.dailyTotalSalary ?? totals.dailySalary ?? 0);
     const total = staffTotal + dailyTotal;
+    const withdrawn = Number(totals.bonusWithdrawn || 0);
+    const remaining = Math.max(0, total - withdrawn);
     return `<div class="stat-mini" style="text-align:left">
       <p class="stat-mini-lbl">Total Bonus + Gaji</p>
       <div style="display:flex;flex-direction:column;gap:5px;margin-top:3px">
@@ -5520,14 +5763,18 @@ ${lockedByGlobal ? 'Hanya user ini yang dibuka dari closing global. Bonus closin
           <span style="font-size:9.5px;font-weight:800;color:var(--green)">Harian</span>
           <strong style="font-family:var(--num-font);font-size:12px;color:var(--green);white-space:nowrap">Rp ${formatRupiah(dailyTotal)}</strong>
         </div>
+        <div style="display:flex;justify-content:space-between;align-items:center;gap:8px;border:1px solid rgba(255,196,107,.2);border-radius:9px;background:var(--amber-dim);padding:6px 7px">
+          <span style="font-size:9.5px;font-weight:800;color:var(--amber)">Sisa</span>
+          <strong style="font-family:var(--num-font);font-size:12px;color:var(--amber);white-space:nowrap">Rp ${formatRupiah(remaining)}</strong>
+        </div>
       </div>
-      <p style="font-size:9.5px;color:var(--text-ghost);margin-top:5px">Total Rp ${formatRupiah(total)}</p>
+      <p style="font-size:9.5px;color:var(--text-ghost);margin-top:5px">Total Rp ${formatRupiah(total)} · sudah diambil Rp ${formatRupiah(withdrawn)}</p>
     </div>`;
   }
 
   function renderMonthlyReport() {
     const data = buildMonthlyReportData(getReportMonthKey());
-    const { meta, totals, userRows, dailyRows, transactions, closings, manualBonuses } = data;
+    const { meta, totals, userRows, dailyRows, transactions, closings, manualBonuses, bonusWithdrawals } = data;
     const targetLabel = isAdmin() ? getSelectedUserLabel() : (currentUser?.name || 'Data Saya');
     const topTx = totals.topTransaction;
     const bestDay = totals.bestDay;
@@ -5573,9 +5820,10 @@ ${lockedByGlobal ? 'Hanya user ini yang dibuka dari closing global. Bonus closin
             ['Bonus Transaksi Staff', totals.staffTrxBonus, 'fa-percent'],
             ['Gaji / Bonus Harian', totals.dailySalary, 'fa-user-clock'],
             ['Bonus Closing', totals.closingBonus, 'fa-lock'],
-            ['Bonus Manual', totals.manualBonus, 'fa-pen-to-square']
+            ['Bonus Manual', totals.manualBonus, 'fa-pen-to-square'],
+            ['Sudah Diambil', totals.bonusWithdrawn, 'fa-money-bill-wave']
           ].map(([label, value, icon]) => `<div style="display:flex;justify-content:space-between;align-items:center;gap:10px;padding:8px 10px;border:1px solid var(--border);border-radius:11px;background:var(--surface)"><span style="color:#171717;font-weight:700"><i class="fas ${icon}" style="color:#171717;width:16px"></i> ${label}</span><strong style="font-family:var(--num-font);color:#171717">Rp ${formatRupiah(value)}</strong></div>`).join('')}
-          <div style="display:flex;justify-content:space-between;align-items:center;gap:10px;padding:10px;border:1px solid rgba(255,196,107,.22);border-radius:12px;background:var(--amber-dim)"><span style="font-weight:800;color:#171717">Total dibayarkan</span><strong style="font-family:var(--num-font);font-size:15px;color:#171717">Rp ${formatRupiah(totals.totalBonus)}</strong></div>
+          <div style="display:flex;justify-content:space-between;align-items:center;gap:10px;padding:10px;border:1px solid rgba(255,196,107,.22);border-radius:12px;background:var(--amber-dim)"><span style="font-weight:800;color:#171717">Sisa dibayar</span><strong style="font-family:var(--num-font);font-size:15px;color:#171717">Rp ${formatRupiah(totals.remainingBonus)}</strong></div>
         </div>
       </div>
       <div class="card page-in s2" style="padding:13px 14px;margin-top:10px">
@@ -5603,8 +5851,10 @@ ${lockedByGlobal ? 'Hanya user ini yang dibuka dari closing global. Bonus closin
               <div>Closing: <b style="color:var(--text)">Rp ${formatRupiah(row.closingBonus)}</b></div>
               <div>Manual: <b style="color:${row.manualBonus < 0 ? 'var(--red)' : 'var(--text)'}">Rp ${formatRupiah(row.manualBonus)}</b></div>
               <div>Gaji harian: <b style="color:var(--text)">Rp ${formatRupiah(row.dailySalary)}</b></div>
+              <div>Diambil: <b style="color:var(--red)">Rp ${formatRupiah(row.bonusWithdrawn)}</b></div>
+              <div>Sisa: <b style="color:var(--amber)">Rp ${formatRupiah(row.remainingBonus)}</b></div>
             </div>
-            <div style="display:flex;justify-content:space-between;align-items:center;border-top:1px solid var(--border);margin-top:8px;padding-top:8px"><span style="font-size:10px;color:var(--text-ghost)">${row.hariTransaksi} hari transaksi · avg Rp ${formatRupiah(row.avgTransaction)}</span><strong style="font-family:var(--num-font);font-size:12px;color:var(--amber)">Total Rp ${formatRupiah(row.totalBonus)}</strong></div>
+            <div style="display:flex;justify-content:space-between;align-items:center;border-top:1px solid var(--border);margin-top:8px;padding-top:8px"><span style="font-size:10px;color:var(--text-ghost)">${row.hariTransaksi} hari transaksi · avg Rp ${formatRupiah(row.avgTransaction)}</span><strong style="font-family:var(--num-font);font-size:12px;color:var(--amber)">Sisa Rp ${formatRupiah(row.remainingBonus)}</strong></div>
           </div>`).join('') || `<div style="font-size:12px;color:var(--text-soft);padding:12px;text-align:center;border:1px dashed var(--border);border-radius:12px">Belum ada data user untuk bulan ini.</div>`}
         </div>
       </div>
@@ -5630,6 +5880,10 @@ ${lockedByGlobal ? 'Hanya user ini yang dibuka dari closing global. Bonus closin
           <div>
             <div style="font-size:11px;font-weight:800;color:var(--amber);margin-bottom:6px"><i class="fas fa-pen-to-square"></i> Bonus Manual</div>
             ${manualBonuses.slice(0, 12).map(b => `<div style="display:flex;justify-content:space-between;gap:8px;padding:7px 0;border-bottom:1px solid var(--border);font-size:11px"><span>${escapeHtml(b.name || b.user)} · ${escapeHtml(b.note || b.reason || 'Bonus manual')}</span><b style="font-family:var(--num-font);color:${Number(b.amount || 0) < 0 ? 'var(--red)' : 'var(--text)'}">Rp ${formatRupiah(b.amount)}</b></div>`).join('') || `<div style="font-size:11px;color:var(--text-soft)">Belum ada bonus manual bulan ini.</div>`}
+          </div>
+          <div>
+            <div style="font-size:11px;font-weight:800;color:var(--green);margin-bottom:6px"><i class="fas fa-money-bill-wave"></i> Ambil Bonus</div>
+            ${bonusWithdrawals.slice(0, 12).map(b => `<div style="display:flex;justify-content:space-between;gap:8px;padding:7px 0;border-bottom:1px solid var(--border);font-size:11px"><span>${escapeHtml(b.name || b.user)} · ${escapeHtml(b.note || 'Ambil bonus sebagian')}</span><b style="font-family:var(--num-font);color:var(--green)">Rp ${formatRupiah(bonusWithdrawalAmount(b))}</b></div>`).join('') || `<div style="font-size:11px;color:var(--text-soft)">Belum ada ambil bonus bulan ini.</div>`}
           </div>
           <div>
             <div style="font-size:11px;font-weight:800;color:var(--accent);margin-bottom:6px"><i class="fas fa-arrow-trend-up"></i> Top 10 Transaksi</div>
@@ -5659,10 +5913,12 @@ ${lockedByGlobal ? 'Hanya user ini yang dibuka dari closing global. Bonus closin
       const closingDateSnap = await getDocs(query(collection(db, 'closings'), where('dateKey', '>=', meta.start), where('dateKey', '<=', meta.end), limit(maxRows)));
       const manualMonthSnap = await getDocs(query(collection(db, 'manualBonuses'), where('monthKey', '==', meta.key), limit(maxRows)));
       const manualDateSnap = await getDocs(query(collection(db, 'manualBonuses'), where('dateKey', '>=', meta.start), where('dateKey', '<=', meta.end), limit(maxRows)));
+      const manualTargetSnap = await getDocs(query(collection(db, 'manualBonuses'), where('id', '>=', 'targetbonus_' + meta.start), where('id', '<=', 'targetbonus_' + meta.end + '\uf8ff'), limit(maxRows)));
+      const manualTrialSnap = await getDocs(query(collection(db, 'manualBonuses'), where('id', '>=', 'trial_targetbonus_' + meta.start), where('id', '<=', 'trial_targetbonus_' + meta.end + '\uf8ff'), limit(maxRows)));
       cachedTransactions = mergeById(cachedTransactions, [...txMonthSnap.docs, ...txDateSnap.docs].map(d => ({ id: d.id, ...d.data() })));
       cachedAttendance = mergeById(cachedAttendance, attSnap.docs.map(d => ({ id: d.id, ...d.data() })));
       cachedClosings = mergeById(cachedClosings, [...closingMonthSnap.docs, ...closingDateSnap.docs].map(d => ({ id: d.id, ...d.data() })).filter(isClosingDataRecord));
-      cachedManualBonuses = dedupeManualBonusRecords(mergeById(cachedManualBonuses, [...manualMonthSnap.docs, ...manualDateSnap.docs].map(d => ({ id: d.id, ...d.data() }))));
+      cachedManualBonuses = dedupeManualBonusRecords(mergeById(cachedManualBonuses, [...manualMonthSnap.docs, ...manualDateSnap.docs, ...manualTargetSnap.docs, ...manualTrialSnap.docs].map(d => ({ id: d.id, ...d.data() })).filter(b => extractMonthKey(b) === meta.key)));
       showToast(`✓ Data ${meta.label} disinkronkan`);
       await renderReport();
     } catch (e) {
@@ -5701,6 +5957,7 @@ ${lockedByGlobal ? 'Hanya user ini yang dibuka dari closing global. Bonus closin
       : { type:'yearly', year };
     const bonusBreakdown = getBonusBreakdown(ft, isAdmin() && selectedUserFilter !== 'all' ? selectedUserFilter : (!isAdmin() ? currentUser.username : null), bonusPeriod);
     const bonus = bonusBreakdown.totalBonus;
+    const bonusRemaining = bonusBreakdown.remainingBonus;
     const hadir = new Set(fa.map(a => `${sanitizeUsername(a.user)}-${extractDateKey(a)}`)).size;
     const userAktif = new Set(ft.map(t => t.user)).size;
     rv.innerHTML = `
@@ -5718,8 +5975,8 @@ ${lockedByGlobal ? 'Hanya user ini yang dibuka dari closing global. Bonus closin
         </div>
         <div class="stat-mini">
           <p class="stat-mini-lbl">Bonus</p>
-          <p class="stat-mini-num" style="color:var(--amber)">${formatRupiah(bonus)}</p>
-          <p style="font-size:9.5px;color:var(--text-ghost);margin-top:3px">FEE</p>
+          <p class="stat-mini-num" style="color:var(--amber)">${formatRupiah(bonusRemaining)}</p>
+          <p style="font-size:9.5px;color:var(--text-ghost);margin-top:3px">Sisa dari Rp ${formatRupiah(bonus)}</p>
         </div>
       </div>
       ${isAdmin() ? `
@@ -5787,6 +6044,8 @@ ${lockedByGlobal ? 'Hanya user ini yang dibuka dari closing global. Bonus closin
       gaji_bonus_harian: '',
       bonus_closing: '',
       bonus_manual: '',
+      bonus_sudah_diambil: '',
+      sisa_bonus: '',
       total_bonus_gaji: '',
       omzet_bersih: '',
       keterangan
@@ -5806,6 +6065,8 @@ ${lockedByGlobal ? 'Hanya user ini yang dibuka dari closing global. Bonus closin
       gaji_bonus_harian: data.totals.dailySalary,
       bonus_closing: data.totals.closingBonus,
       bonus_manual: data.totals.manualBonus,
+      bonus_sudah_diambil: data.totals.bonusWithdrawn,
+      sisa_bonus: data.totals.remainingBonus,
       total_bonus_gaji: data.totals.totalBonus,
       omzet_bersih: Number(data.totals.omzet || 0) - Number(data.totals.totalBonus || 0)
     });
@@ -5820,6 +6081,8 @@ ${lockedByGlobal ? 'Hanya user ini yang dibuka dari closing global. Bonus closin
       gaji_bonus_harian: rupiahText(data.totals.dailySalary),
       bonus_closing: rupiahText(data.totals.closingBonus),
       bonus_manual: rupiahText(data.totals.manualBonus),
+      bonus_sudah_diambil: rupiahText(data.totals.bonusWithdrawn),
+      sisa_bonus: rupiahText(data.totals.remainingBonus),
       total_bonus_gaji: rupiahText(data.totals.totalBonus),
       omzet_bersih: rupiahText(Number(data.totals.omzet || 0) - Number(data.totals.totalBonus || 0))
     });
@@ -5871,6 +6134,8 @@ ${lockedByGlobal ? 'Hanya user ini yang dibuka dari closing global. Bonus closin
         gaji_bonus_harian: row.dailySalary,
         bonus_closing: row.closingBonus,
         bonus_manual: row.manualBonus,
+        bonus_sudah_diambil: row.bonusWithdrawn,
+        sisa_bonus: row.remainingBonus,
         total_bonus_gaji: row.totalBonus,
         omzet_bersih: Number(row.omzet || 0) - Number(row.totalBonus || 0)
       });
@@ -5952,6 +6217,8 @@ ${lockedByGlobal ? 'Hanya user ini yang dibuka dari closing global. Bonus closin
     metric('Gaji / Bonus Harian', rupiah(data.totals.dailySalary), pct(data.totals.dailySalary, bonusTotal));
     metric('Bonus Closing', rupiah(data.totals.closingBonus), pct(data.totals.closingBonus, bonusTotal));
     metric('Bonus Manual', rupiah(data.totals.manualBonus), pct(data.totals.manualBonus, bonusTotal));
+    metric('Sudah Diambil', rupiah(data.totals.bonusWithdrawn), 'Pembayaran bonus sebagian');
+    metric('Sisa Bonus Dibayar', rupiah(data.totals.remainingBonus), 'Total bonus/gaji - sudah diambil');
     metric('Total Bonus + Gaji', rupiah(data.totals.totalBonus), 'Total kewajiban bulan ini');
 
     section('HIGHLIGHT');
@@ -5961,7 +6228,7 @@ ${lockedByGlobal ? 'Hanya user ini yang dibuka dari closing global. Bonus closin
     metric('Transaksi Tertinggi', topTransaction ? `${topTransaction.name || topTransaction.user || '-'} · ${getTransactionDateKey(topTransaction) || '-'}` : '-', topTransaction ? `${rupiah(topTransaction.amount)} · ${topTransaction.note || ''}` : '');
 
     section('RINGKASAN PER USER');
-    rows.push(['No', 'Nama', 'Username', 'Role', 'Omzet', 'Transaksi', 'Hari Transaksi', 'Hari Hadir', 'Rata-rata/Transaksi', 'Bonus Transaksi', 'Gaji/Harian', 'Bonus Closing', 'Bonus Manual', 'Total Bonus/Gaji', 'Omzet Bersih']);
+    rows.push(['No', 'Nama', 'Username', 'Role', 'Omzet', 'Transaksi', 'Hari Transaksi', 'Hari Hadir', 'Rata-rata/Transaksi', 'Bonus Transaksi', 'Gaji/Harian', 'Bonus Closing', 'Bonus Manual', 'Sudah Diambil', 'Sisa Bonus', 'Total Bonus/Gaji', 'Omzet Bersih']);
     data.userRows.forEach((row, idx) => {
       rows.push([
         idx + 1,
@@ -5977,6 +6244,8 @@ ${lockedByGlobal ? 'Hanya user ini yang dibuka dari closing global. Bonus closin
         rupiah(row.dailySalary),
         rupiah(row.closingBonus),
         rupiah(row.manualBonus),
+        rupiah(row.bonusWithdrawn),
+        rupiah(row.remainingBonus),
         rupiah(row.totalBonus),
         rupiah(Number(row.omzet || 0) - Number(row.totalBonus || 0))
       ]);
@@ -5995,7 +6264,7 @@ ${lockedByGlobal ? 'Hanya user ini yang dibuka dari closing global. Bonus closin
     const ws = XLSX.utils.aoa_to_sheet(rows);
     ws['!cols'] = [
       { wch: 24 }, { wch: 24 }, { wch: 18 }, { wch: 14 }, { wch: 18 }, { wch: 12 }, { wch: 14 }, { wch: 12 },
-      { wch: 18 }, { wch: 18 }, { wch: 18 }, { wch: 18 }, { wch: 18 }, { wch: 18 }, { wch: 18 }
+      { wch: 18 }, { wch: 18 }, { wch: 18 }, { wch: 18 }, { wch: 18 }, { wch: 18 }, { wch: 18 }, { wch: 18 }, { wch: 18 }
     ];
     ws['!merges'] = [{ s: { r: 0, c: 0 }, e: { r: 0, c: 6 } }];
     XLSX.utils.book_append_sheet(wb, ws, 'Ringkasan Bulanan');
@@ -9448,6 +9717,8 @@ Masukkan PIN admin:`);
   window.saveUserBonusControl = saveUserBonusControl;
   window.saveManualBonus = saveManualBonus;
   window.deleteManualBonus = deleteManualBonus;
+  window.saveBonusWithdrawal = saveBonusWithdrawal;
+  window.deleteBonusWithdrawal = deleteBonusWithdrawal;
   window.saveReceiptTextSettings = saveReceiptTextSettings;
   window.resetReceiptTextSettingsForm = resetReceiptTextSettingsForm;
   window.updateReceiptSettingsPreview = updateReceiptSettingsPreview;
