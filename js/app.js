@@ -33,6 +33,14 @@ import { createClient as createSupabaseClient } from "https://cdn.jsdelivr.net/n
   const SUPABASE_TABLES = ['users','attendance','transactions','closings','manualBonuses','staff_leave_requests','dailyTargets','targetBonusRewards','targetNotifications','targetSettings','audit_logs','adminDeviceTokens'];
   const SUPABASE_FALLBACK_POLL_MS = 2 * 60 * 1000;
   const SUPABASE_REALTIME_DEBOUNCE_MS = 450;
+  const SUPABASE_DEFAULT_ORDER_BY = {
+    transactions: { field: 'createdAtMs', direction: 'desc' },
+    attendance: { field: 'createdAtMs', direction: 'desc' },
+    closings: { field: 'dateKey', direction: 'desc' },
+    manualBonuses: { field: 'createdAtMs', direction: 'desc' },
+    staff_leave_requests: { field: 'createdAtMs', direction: 'desc' },
+    audit_logs: { field: 'createdAtMs', direction: 'desc' }
+  };
   const SERVER_TIMESTAMP_SENTINEL = { __supabaseServerTimestamp: true };
   const Timestamp = {
     fromMillis(ms){
@@ -137,6 +145,33 @@ import { createClient as createSupabaseClient } from "https://cdn.jsdelivr.net/n
     if (c.op === '<') return a < b;
     return true;
   }
+  function isSimpleSupabaseField(field) {
+    return /^[a-zA-Z0-9_]+$/.test(String(field || ''));
+  }
+  function supabaseFieldPath(field) {
+    const safeField = String(field || '');
+    if (safeField === 'id') return 'id';
+    if (!isSimpleSupabaseField(safeField)) return '';
+    return `data->>${safeField}`;
+  }
+  function getSupabaseOrderConstraint(collectionName, constraints) {
+    const explicit = constraints.find((c) => c.kind === 'orderBy');
+    if (explicit) return { ...explicit, implicit: false };
+    if (!constraints.some((c) => c.kind === 'limit')) return null;
+    const fallback = SUPABASE_DEFAULT_ORDER_BY[collectionName] || null;
+    return fallback ? { kind: 'orderBy', ...fallback, implicit: true } : null;
+  }
+  function applySupabaseOrder(req, collectionName, constraints, useServerOrder = true) {
+    const ord = getSupabaseOrderConstraint(collectionName, constraints);
+    if (!ord || !useServerOrder) return { req, order: ord, applied: false };
+    const fieldPath = supabaseFieldPath(ord.field);
+    if (!fieldPath) return { req, order: ord, applied: false };
+    return {
+      req: req.order(fieldPath, { ascending: ord.direction !== 'desc' }),
+      order: ord,
+      applied: true
+    };
+  }
   function snapshotIds(snap) {
     try {
       if (snap && Array.isArray(snap.docs)) return new Set(snap.docs.map((doc) => String(doc.id)));
@@ -178,11 +213,11 @@ import { createClient as createSupabaseClient } from "https://cdn.jsdelivr.net/n
     let canServerFilter = true;
     for (const c of constraints.filter((item) => item.kind === 'where')) {
       total++;
-      if (!/^[a-zA-Z0-9_]+$/.test(c.field || '')) {
+      const fieldPath = supabaseFieldPath(c.field);
+      if (!fieldPath) {
         canServerFilter = false;
         continue;
       }
-      const fieldPath = c.field === 'id' ? 'id' : `data->>${c.field}`;
       if (c.op === '==') {
         req = req.eq(fieldPath, String(c.value));
         applied++;
@@ -209,7 +244,7 @@ import { createClient as createSupabaseClient } from "https://cdn.jsdelivr.net/n
         canServerFilter = false;
       }
     }
-    return { req, applied, total, canServerFilter: total > 0 && canServerFilter && applied === total };
+    return { req, applied, total, canServerFilter: canServerFilter && applied === total };
   }
   async function getDoc(ref) {
     const { data, error } = await supabase.from(ref.collectionName).select('id,data').eq('id', ref.id).maybeSingle();
@@ -221,13 +256,27 @@ import { createClient as createSupabaseClient } from "https://cdn.jsdelivr.net/n
     const collectionName = qy.collectionName;
     const constraints = qy.constraints || [];
     const hardLimit = constraints.find((c) => c.kind === 'limit')?.count || 1000;
-    const filteredReq = applySupabaseWhereFilters(supabase.from(collectionName).select('id,data'), constraints);
-    const fetchLimit = filteredReq.canServerFilter ? hardLimit : Math.min(Math.max(hardLimit * 3, hardLimit), 5000);
-    const { data, error } = await filteredReq.req.limit(fetchLimit);
+    let filteredReq = applySupabaseWhereFilters(supabase.from(collectionName).select('id,data'), constraints);
+    let orderedReq = applySupabaseOrder(filteredReq.req, collectionName, constraints, true);
+    let needsClientWhere = filteredReq.applied < filteredReq.total;
+    let needsClientOrder = !!orderedReq.order && !orderedReq.applied && !orderedReq.order.implicit;
+    let fetchLimit = (needsClientWhere || needsClientOrder) ? Math.min(Math.max(hardLimit * 3, hardLimit), 5000) : hardLimit;
+    let { data, error } = await orderedReq.req.limit(fetchLimit);
+    if (error && orderedReq.applied) {
+      console.warn('Order Supabase server gagal, pakai urutan lokal:', error.message || error);
+      filteredReq = applySupabaseWhereFilters(supabase.from(collectionName).select('id,data'), constraints);
+      orderedReq = applySupabaseOrder(filteredReq.req, collectionName, constraints, false);
+      needsClientWhere = filteredReq.applied < filteredReq.total;
+      needsClientOrder = !!orderedReq.order && !orderedReq.applied && !orderedReq.order.implicit;
+      fetchLimit = (needsClientWhere || needsClientOrder) ? Math.min(Math.max(hardLimit * 3, hardLimit), 5000) : hardLimit;
+      const fallback = await orderedReq.req.limit(fetchLimit);
+      data = fallback.data;
+      error = fallback.error;
+    }
     if (error) throw error;
     let rows = (data || []).map(normalizeRow);
     constraints.filter((c) => c.kind === 'where').forEach((c) => { rows = rows.filter((row) => compareWhere(row, c)); });
-    const ord = constraints.find((c) => c.kind === 'orderBy');
+    const ord = orderedReq.order;
     if (ord) {
       rows.sort((x, y) => {
         const a = getFieldValue(x, ord.field);
@@ -506,7 +555,7 @@ import { createClient as createSupabaseClient } from "https://cdn.jsdelivr.net/n
   let appPageHistoryStack = [], appBackNavigating = false;
   let selectedRestoreProFile = null;
   let cachedTransactions = [], cachedAttendance = [], cachedUsers = [], cachedAuditLogs = [], cachedClosings = [], cachedManualBonuses = [], cachedUnlockRequests = [];
-  let cachedDailyTarget = null, cachedTargetNotification = null, cachedTargetSettings = {}, cachedTargetSettingRows = [], serverTargetApplyTimer = 0, serverTargetApplying = false;
+  let cachedDailyTarget = null, cachedTargetNotification = null, cachedTargetSettings = {}, cachedTargetSettingRows = [], serverTargetApplyTimer = 0, serverTargetApplying = false, serverTargetSettingsLastLoadAt = 0;
   let adminNotifBootstrapped = false;
   let adminNotifSeenIds = new Set();
   let cachedBonusSettings = { transactionBonusRate: 0.015, transactionBonusPercent: 1.5, closingBonusPerMinute: 100, closingDeadlineTime: '18:00', closingDeadlineHour: 18, closingDeadlineMinute: 0, closingDeadlineMinutes: 1080 };
@@ -531,6 +580,7 @@ import { createClient as createSupabaseClient } from "https://cdn.jsdelivr.net/n
   let clockInInFlight = false;
   let manualRefreshInFlight = false, lastManualRefreshAt = 0, forceCashFisikNextRender = false;
   let manualBonusSaveInFlight = false, lastManualBonusSubmitSignature = '', lastManualBonusSubmitAt = 0;
+  let refreshCurrentPageTimer = 0, refreshCurrentPageRunning = false, refreshCurrentPageNeedsRun = false;
 
   const $ = (id) => document.getElementById(id);
   const setLoading = (s) => {
@@ -1608,15 +1658,44 @@ import { createClient as createSupabaseClient } from "https://cdn.jsdelivr.net/n
     });
     return [...map.values()].sort((a, b) => String(b.effectiveDate || b.dateKey).localeCompare(String(a.effectiveDate || a.dateKey)));
   }
-  function renderServerTargetScheduleList() {
-    const rows = serverTargetScheduleRows().slice(0, 12);
-    if (!rows.length) return `<div style="background:var(--surface);border:1px solid var(--border);border-radius:13px;padding:12px 13px"><p class="label-xs">Jadwal Target Tersimpan</p><p style="font-size:10.5px;color:var(--text-soft);margin-top:6px;line-height:1.35">Belum ada jadwal target bertanggal.</p></div>`;
-    return `<div style="background:var(--surface);border:1px solid var(--border);border-radius:13px;padding:12px 13px"><p class="label-xs">Jadwal Target Tersimpan</p><div style="display:grid;gap:7px;margin-top:8px">${rows.map((r) => { const dk = serverNormalizeTargetDateKey(r.effectiveDate || r.dateKey, ''); const rowId = String(r.id || serverTargetSettingDocId(dk)).replace(/[^a-zA-Z0-9_-]/g, ''); return `<div style="display:grid;grid-template-columns:minmax(62px,.75fr) minmax(0,1fr) minmax(0,1fr) auto auto;gap:6px;align-items:center;border:1px solid var(--border);border-radius:12px;padding:8px;background:var(--bg2)"><b style="font-size:11px;white-space:nowrap">${escapeHtml(formatDateLabel(dk))}</b><span style="font-size:10.5px;color:var(--text-soft);font-weight:800;white-space:nowrap;overflow:hidden;text-overflow:ellipsis">Target Rp ${formatRupiah(r.targetAmount)}</span><span style="font-size:10.5px;color:var(--text-soft);font-weight:800;white-space:nowrap;overflow:hidden;text-overflow:ellipsis">Bonus Rp ${formatRupiah(r.bonusAmount)}</span><button onclick="editServerTargetSchedule('${dk}')" class="btn" title="Edit target tanggal ini" style="width:34px;height:34px;min-height:34px;padding:0;border-radius:10px"><i class="fas fa-pen"></i></button><button onclick="deleteServerTargetSchedule('${dk}','${rowId}')" class="btn btn-danger" title="Hapus target tanggal ini" style="width:34px;height:34px;min-height:34px;padding:0;border-radius:10px"><i class="fas fa-trash"></i></button></div>`; }).join('')}</div><p style="font-size:10.5px;color:var(--text-soft);margin-top:7px;line-height:1.35">Tanggal yang belum diset akan memakai target terakhir sebelumnya.</p></div>`;
+  function renderServerTargetScheduleList(options = {}) {
+    const allRows = serverTargetScheduleRows();
+    const rows = allRows.slice(0, Number(options.limit || 12));
+    const showAddButton = options.showAddButton === true;
+    const addButton = showAddButton ? `<button onclick="openServerDailyTargetSettings()" class="btn btn-primary" style="padding:8px 10px;font-size:11px;white-space:nowrap"><i class="fas fa-plus"></i> Tambah</button>` : '';
+    const header = `
+      <div style="display:flex;align-items:center;justify-content:space-between;gap:10px;margin-bottom:${rows.length ? '8px' : '0'}">
+        <div style="min-width:0">
+          <p class="label-xs" style="margin:0">Jadwal Target Tersimpan</p>
+          <p style="font-size:10px;color:var(--text-soft);margin-top:3px;line-height:1.3">${allRows.length ? `${allRows.length} jadwal target tersimpan` : 'Belum ada jadwal bertanggal'}</p>
+        </div>
+        ${addButton}
+      </div>`;
+    if (!rows.length) {
+      return `<div style="background:var(--surface);border:1px solid var(--border);border-radius:13px;padding:12px 13px">${header}<p style="font-size:10.5px;color:var(--text-soft);margin-top:8px;line-height:1.35">Target yang disimpan dari popup Atur Target akan muncul di sini.</p></div>`;
+    }
+    return `<div style="background:var(--surface);border:1px solid var(--border);border-radius:13px;padding:12px 13px">${header}<div style="display:grid;gap:7px">${rows.map((r) => {
+      const dk = serverNormalizeTargetDateKey(r.effectiveDate || r.dateKey, '');
+      const rowId = String(r.id || serverTargetSettingDocId(dk)).replace(/[^a-zA-Z0-9_-]/g, '');
+      return `<div style="display:flex;align-items:center;gap:8px;border:1px solid var(--border);border-radius:12px;padding:9px 10px;background:var(--bg2)">
+        <div style="min-width:0;flex:1">
+          <b style="display:block;font-size:11.5px;color:var(--text);white-space:nowrap;overflow:hidden;text-overflow:ellipsis">${escapeHtml(formatDateLabel(dk))}</b>
+          <div style="font-size:10.5px;color:var(--text-soft);font-weight:800;margin-top:3px;white-space:nowrap;overflow:hidden;text-overflow:ellipsis">Target Rp ${formatRupiah(r.targetAmount)} · Bonus Rp ${formatRupiah(r.bonusAmount)}</div>
+        </div>
+        <button onclick="editServerTargetSchedule('${dk}')" class="btn" title="Edit target tanggal ini" style="width:34px;height:34px;min-height:34px;padding:0;border-radius:10px;flex-shrink:0"><i class="fas fa-pen"></i></button>
+        <button onclick="deleteServerTargetSchedule('${dk}','${rowId}')" class="btn btn-danger" title="Hapus target tanggal ini" style="width:34px;height:34px;min-height:34px;padding:0;border-radius:10px;flex-shrink:0"><i class="fas fa-trash"></i></button>
+      </div>`;
+    }).join('')}</div><p style="font-size:10.5px;color:var(--text-soft);margin-top:7px;line-height:1.35">Tanggal yang belum diset akan memakai target terakhir sebelumnya.</p></div>`;
   }
-  window.editServerTargetSchedule = function(dk) {
+  window.editServerTargetSchedule = async function(dk) {
+    const safeDate = serverNormalizeTargetDateKey(dk, '');
+    if (!safeDate) return showToast('Tanggal target tidak valid', true);
+    if (!document.getElementById('serverTargetEffectiveDate')) {
+      await window.openServerDailyTargetSettings();
+    }
     const el = document.getElementById('serverTargetEffectiveDate');
-    if (el) el.value = dk;
-    const row = (cachedTargetSettingRows || []).find(r => serverNormalizeTargetDateKey(r.effectiveDate || r.dateKey, '') === dk);
+    if (el) el.value = safeDate;
+    const row = (cachedTargetSettingRows || []).find(r => serverNormalizeTargetDateKey(r.effectiveDate || r.dateKey, '') === safeDate);
     if (row) {
       const ta = document.getElementById('serverTargetAmountInput');
       const ba = document.getElementById('serverTargetBonusInput');
@@ -1663,6 +1742,7 @@ import { createClient as createSupabaseClient } from "https://cdn.jsdelivr.net/n
       const picked = serverPickTargetSettings(rows, targetDate);
       if (picked) {
         cachedTargetSettings = picked;
+        serverTargetSettingsLastLoadAt = Date.now();
         return;
       }
     } catch (e) {
@@ -1677,13 +1757,16 @@ import { createClient as createSupabaseClient } from "https://cdn.jsdelivr.net/n
           const rowDate = serverTargetSettingDate(data);
           if (!rowDate || rowDate <= targetDate) {
             cachedTargetSettings = serverNormalizeTargetSettings(data, targetDate);
+            serverTargetSettingsLastLoadAt = Date.now();
             return;
           }
         }
       } catch (_) {
+        serverTargetSettingsLastLoadAt = Date.now();
         return;
       }
     }
+    serverTargetSettingsLastLoadAt = Date.now();
   }
   async function serverInsertIfAbsent(table, id, payload) {
     try {
@@ -2047,7 +2130,6 @@ import { createClient as createSupabaseClient } from "https://cdn.jsdelivr.net/n
             <p class="label-xs">Bonus per Staff Hadir</p>
             <input id="serverTargetBonusInput" class="g-input" value="${escapeHtml(formatRupiah(summary.bonusAmount))}" inputmode="numeric" placeholder="Bonus target">
           </div>
-          ${renderServerTargetScheduleList()}
         </div>
         <div style="display:grid;grid-template-columns:1fr 1fr;gap:9px;margin-top:12px">
           <button onclick="closeServerDailyTargetSettingsModal()" class="btn btn-glass" style="padding:11px;font-size:12px">Batal</button>
@@ -2096,6 +2178,7 @@ import { createClient as createSupabaseClient } from "https://cdn.jsdelivr.net/n
       adminDashboardPanelsHash = '';
       renderAdminDashboardPanels();
       closeServerDailyTargetSettingsModal();
+      requestRefreshCurrentPage();
       showToast(future ? `Target dijadwalkan untuk ${effectiveDate}` : 'Target dan bonus dievaluasi & disimpan');
     } catch (e) {
       showToast('Gagal simpan target: ' + (e.code || e.message || 'cek koneksi'), true);
@@ -2148,6 +2231,7 @@ import { createClient as createSupabaseClient } from "https://cdn.jsdelivr.net/n
       adminDashboardPanelsHash = '';
       renderAdminDashboardPanels();
       closeServerDailyTargetSettingsModal();
+      requestRefreshCurrentPage();
       showToast(`Target tanggal ${effectiveDate} dihapus dan dievaluasi ulang`);
     } catch (e) {
       showToast('Gagal hapus target: ' + (e.code || e.message || 'cek koneksi'), true);
@@ -3915,29 +3999,29 @@ ${lockedByGlobal ? 'Hanya user ini yang dibuka dari closing global. Bonus closin
     attendanceReady = false;
     stopRealtimeData();
 
-    const tq = query(collection(db, 'transactions'), limit(TX_SYNC_LIMIT_ADMIN));
+    const tq = query(collection(db, 'transactions'), orderBy('createdAtMs', 'desc'), limit(TX_SYNC_LIMIT_ADMIN));
     unsubTransactions = onSnapshot(tq, (snap) => {
       cachedTransactions = sortByCreatedDesc(
         snap.docs.map(d => ({ id: d.id, ...d.data() }))
       );
       handleAdminTransactionSnapshotNotifications(snap);
       serverScheduleDailyTargetCheck();
-      refreshCurrentPage();
+      requestRefreshCurrentPage();
     }, async (err) => {
       console.error(err);
       try {
-        const fallbackQ = query(collection(db, 'transactions'), limit(TX_SYNC_LIMIT_ADMIN));
+        const fallbackQ = query(collection(db, 'transactions'), orderBy('createdAtMs', 'desc'), limit(TX_SYNC_LIMIT_ADMIN));
         const fallbackSnap = await getDocs(fallbackQ);
         cachedTransactions = sortByCreatedDesc(
           fallbackSnap.docs.map(d => ({ id: d.id, ...d.data() }))
         );
-        refreshCurrentPage();
+        requestRefreshCurrentPage();
       } catch (e) {
         console.error('Fallback transaksi gagal:', e);
       }
     });
 
-    const aq = query(collection(db, 'attendance'), limit(ATT_SYNC_LIMIT_ADMIN));
+    const aq = query(collection(db, 'attendance'), orderBy('createdAtMs', 'desc'), limit(ATT_SYNC_LIMIT_ADMIN));
     unsubAttendance = onSnapshot(aq, (snap) => {
       stripCachedAttendance();
       cachedAttendance = dedupeAttendanceRecords(
@@ -3945,13 +4029,13 @@ ${lockedByGlobal ? 'Hanya user ini yang dibuka dari closing global. Bonus closin
       );
       attendanceReady = true;
       serverScheduleDailyTargetCheck();
-      refreshCurrentPage();
-    }, (err) => { attendanceReady = true; console.error(err); refreshCurrentPage(); });
+      requestRefreshCurrentPage();
+    }, (err) => { attendanceReady = true; console.error(err); requestRefreshCurrentPage(); });
 
-    const cq = query(collection(db, 'closings'), limit(CLOSING_SYNC_LIMIT));
+    const cq = query(collection(db, 'closings'), orderBy('dateKey', 'desc'), limit(CLOSING_SYNC_LIMIT));
     unsubClosings = onSnapshot(cq, (snap) => {
       cachedClosings = sortByCreatedDesc(snap.docs.map(d => ({ id: d.id, ...d.data() })).filter(c => c.id !== HEADER_GUIDE_NOTE_DOC_ID && c.id !== STAFF_DAILY_NOTE_DOC_ID && c.id !== RECEIPT_TEXT_DOC_ID && c.type !== 'header_guide_note' && c.type !== 'staff_daily_home_note' && c.type !== 'receipt_text_settings'));
-      refreshCurrentPage();
+      requestRefreshCurrentPage();
     }, (err) => console.error('Closing listener gagal:', err));
 
     unsubBonusSettings = onSnapshot(doc(db, 'closings', '__bonus_settings'), (snap) => {
@@ -3961,7 +4045,7 @@ ${lockedByGlobal ? 'Hanya user ini yang dibuka dari closing global. Bonus closin
       } else {
         cachedBonusSettings = getDefaultBonusSettings();
       }
-      refreshCurrentPage();
+      requestRefreshCurrentPage();
     }, (err) => console.error('Bonus settings listener gagal:', err));
 
 
@@ -3971,29 +4055,29 @@ ${lockedByGlobal ? 'Hanya user ini yang dibuka dari closing global. Bonus closin
       cachedHeaderGuideNote = snap.exists()
         ? { id: snap.id, note: DEFAULT_HEADER_GUIDE_NOTE, ...(snap.data() || {}) }
         : { id: HEADER_GUIDE_NOTE_DOC_ID, note: DEFAULT_HEADER_GUIDE_NOTE, updatedAtMs: 0, updatedBy: '', updatedByName: '' };
-      refreshCurrentPage();
+      requestRefreshCurrentPage();
     }, (err) => console.error('Catatan Panduan Icon Header listener gagal:', err));
 
     unsubReceiptTextSettings = onSnapshot(doc(db, 'closings', RECEIPT_TEXT_DOC_ID), (snap) => {
       cachedReceiptTextSettings = snap.exists()
         ? normalizeReceiptTextSettings({ id: snap.id, ...(snap.data() || {}) })
         : normalizeReceiptTextSettings({ id: RECEIPT_TEXT_DOC_ID, ...DEFAULT_RECEIPT_TEXT_SETTINGS, updatedAtMs: 0, updatedBy: '', updatedByName: '' });
-      refreshCurrentPage();
+      requestRefreshCurrentPage();
     }, (err) => console.error('Setting tulisan struk listener gagal:', err));
 
-    const mbq = query(collection(db, 'manualBonuses'), limit(MANUAL_BONUS_SYNC_LIMIT));
+    const mbq = query(collection(db, 'manualBonuses'), orderBy('createdAtMs', 'desc'), limit(MANUAL_BONUS_SYNC_LIMIT));
     unsubManualBonuses = onSnapshot(mbq, (snap) => {
       cachedManualBonuses = dedupeManualBonusRecords(
         snap.docs.map(d => ({ id: d.id, ...d.data() }))
       );
       serverScheduleDailyTargetCheck();
-      refreshCurrentPage();
+      requestRefreshCurrentPage();
     }, (err) => console.error('Manual bonus listener gagal:', err));
 
-    const unlockQ = query(collection(db, STAFF_UNLOCK_TABLE), limit(160));
+    const unlockQ = query(collection(db, STAFF_UNLOCK_TABLE), orderBy('createdAtMs', 'desc'), limit(160));
     unsubUnlockRequests = onSnapshot(unlockQ, (snap) => {
       cachedUnlockRequests = snap.docs.map(d => ({ id: d.id, ...d.data() }));
-      refreshCurrentPage();
+      requestRefreshCurrentPage();
     }, (err) => console.error('Buka fitur listener gagal:', err));
 
     const uq = query(collection(db, 'users'), orderBy('name'));
@@ -4001,20 +4085,20 @@ ${lockedByGlobal ? 'Hanya user ini yang dibuka dari closing global. Bonus closin
       cachedUsers = snap.docs.map(d => ({ id: d.id, ...d.data() }));
       cachedUserSelectHtml = ''; // Reset cache saat data user berubah
       serverScheduleDailyTargetCheck();
-      refreshCurrentPage();
+      requestRefreshCurrentPage();
     }, (err) => console.error(err));
 
     unsubRismaManualClosing = onSnapshot(doc(db, RISMA_MANUAL_CLOSING_COLLECTION, RISMA_MANUAL_CLOSING_DOC_ID), (snap) => {
       cachedRismaManualClosingConfig = snap.exists()
         ? { id: snap.id, enabled: true, allowedUsers: [], allowedNames: {}, ...(snap.data() || {}) }
         : { id: RISMA_MANUAL_CLOSING_DOC_ID, enabled: true, allowedUsers: [], allowedNames: {} };
-      refreshCurrentPage();
+      requestRefreshCurrentPage();
     }, (err) => console.error('Closing manual Risma listener gagal:', err));
 
-    const lq = query(collection(db, 'audit_logs'), orderBy('createdAt', 'desc'), limit(AUDIT_SYNC_LIMIT));
+    const lq = query(collection(db, 'audit_logs'), orderBy('createdAtMs', 'desc'), limit(AUDIT_SYNC_LIMIT));
     unsubAuditLogs = onSnapshot(lq, (snap) => {
       cachedAuditLogs = sortByCreatedDesc(snap.docs.map(d => ({ id: d.id, ...d.data() })));
-      refreshCurrentPage();
+      requestRefreshCurrentPage();
     }, (err) => console.error(err));
 
     applyNavRoleLabels();
@@ -4063,6 +4147,27 @@ ${lockedByGlobal ? 'Hanya user ini yang dibuka dari closing global. Bonus closin
       if (isBusy || !isAdminProFormBeingEdited()) renderCurrentAdminProPage();
     }
     else if (currentPage === 'adminLogs') renderAdminLogsPage();
+  }
+
+  function requestRefreshCurrentPage(delay = 90) {
+    if (!currentUser) return;
+    refreshCurrentPageNeedsRun = true;
+    clearTimeout(refreshCurrentPageTimer);
+    refreshCurrentPageTimer = setTimeout(async () => {
+      if (refreshCurrentPageRunning) return;
+      refreshCurrentPageRunning = true;
+      try {
+        while (refreshCurrentPageNeedsRun) {
+          refreshCurrentPageNeedsRun = false;
+          await refreshCurrentPage();
+        }
+      } catch (e) {
+        console.warn('Refresh halaman tertunda gagal:', e?.message || e);
+      } finally {
+        refreshCurrentPageRunning = false;
+        if (refreshCurrentPageNeedsRun) requestRefreshCurrentPage(delay);
+      }
+    }, delay);
   }
 
   function canTransactNow() {
@@ -9040,6 +9145,9 @@ Masukkan PIN admin:`);
   async function renderSettingsSummary() {
     const info = $('settings-summary');
     if (!info || !currentUser) return;
+    if (isAdmin() && Date.now() - Number(serverTargetSettingsLastLoadAt || 0) > 60000) {
+      await serverLoadTargetSettings().catch((e) => console.warn('refresh jadwal target halaman user gagal', e?.code || e?.message || e));
+    }
     const userCount = activeUsers().length;
     const inactiveUsers = sortUsers((cachedUsers || []).filter(u => !isUserActive(u)));
     const visibleInactiveUsers = inactiveUsers.slice(0, inactiveUserLimit);
@@ -9067,9 +9175,13 @@ Masukkan PIN admin:`);
         <span class="setting-label">${escapeHtml(title)}<small style="display:block;font-size:10px;color:var(--text-soft);font-weight:650;margin-top:2px">${escapeHtml(sub)}</small></span>
         <i class="fas fa-chevron-right setting-arrow"></i>
       </button>`).join('') : '';
+    const targetSchedulePanel = isAdmin()
+      ? `<div style="margin-bottom:10px">${renderServerTargetScheduleList({ showAddButton: true, limit: 12 })}</div>`
+      : '';
 
     info.innerHTML = `
       <div style="display:flex;flex-direction:column;gap:0">
+        ${targetSchedulePanel}
         ${adminMenuCards}
       </div>
     `;
@@ -9944,14 +10056,14 @@ Masukkan PIN admin:`);
     const countError = (snap) => { if (!snap) errorCount++; return snap; };
     const txQueryFresh = query(collection(db, 'transactions'), orderBy('createdAtMs', 'desc'), limit(TX_SYNC_LIMIT_ADMIN));
     const txQueryFallback = query(collection(db, 'transactions'), limit(TX_SYNC_LIMIT_ADMIN));
-    const attendanceQuery = query(collection(db, 'attendance'), limit(ATT_SYNC_LIMIT_ADMIN));
-    const manualBonusQuery = query(collection(db, 'manualBonuses'), limit(MANUAL_BONUS_SYNC_LIMIT));
-    const unlockRequestQuery = query(collection(db, STAFF_UNLOCK_TABLE), limit(160));
+    const attendanceQuery = query(collection(db, 'attendance'), orderBy('createdAtMs', 'desc'), limit(ATT_SYNC_LIMIT_ADMIN));
+    const manualBonusQuery = query(collection(db, 'manualBonuses'), orderBy('createdAtMs', 'desc'), limit(MANUAL_BONUS_SYNC_LIMIT));
+    const unlockRequestQuery = query(collection(db, STAFF_UNLOCK_TABLE), orderBy('createdAtMs', 'desc'), limit(160));
 
     const [txSnap, attSnap, closingSnap, bonusSnap, guideNoteSnap, receiptTextSnap, manualBonusSnap, unlockRequestSnap] = await Promise.all([
       getDocsFreshWithFallback('Transaksi terbaru', txQueryFresh, txQueryFallback).then(countError),
       getDocsFreshSafe('Absensi', attendanceQuery).then(countError),
-      getDocsFreshSafe('Closing', query(collection(db, 'closings'), limit(CLOSING_SYNC_LIMIT))).then(countError),
+      getDocsFreshSafe('Closing', query(collection(db, 'closings'), orderBy('dateKey', 'desc'), limit(CLOSING_SYNC_LIMIT))).then(countError),
       getDocFreshSafe('Setting bonus', doc(db, 'closings', '__bonus_settings')).then(countError),
       getDocFreshSafe('Catatan panduan header', doc(db, 'closings', HEADER_GUIDE_NOTE_DOC_ID)).then(countError),
       getDocFreshSafe('Setting tulisan struk', doc(db, 'closings', RECEIPT_TEXT_DOC_ID)).then(countError),
@@ -10011,7 +10123,7 @@ Masukkan PIN admin:`);
     const [usersSnap, rismaSnap, auditSnap] = await Promise.all([
       getDocsFreshSafe('User', query(collection(db, 'users'), orderBy('name'))).then(countError),
       getDocFreshSafe('Closing manual Risma', doc(db, RISMA_MANUAL_CLOSING_COLLECTION, RISMA_MANUAL_CLOSING_DOC_ID)).then(countError),
-      getDocsFreshSafe('Audit log', query(collection(db, 'audit_logs'), orderBy('createdAt', 'desc'), limit(AUDIT_SYNC_LIMIT))).then(countError)
+      getDocsFreshSafe('Audit log', query(collection(db, 'audit_logs'), orderBy('createdAtMs', 'desc'), limit(AUDIT_SYNC_LIMIT))).then(countError)
     ]);
     if (usersSnap) cachedUsers = usersSnap.docs.map(d => ({ id: d.id, ...d.data() }));
     if (rismaSnap) {
