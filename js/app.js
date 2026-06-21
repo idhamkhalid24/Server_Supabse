@@ -540,6 +540,7 @@ import { createClient as createSupabaseClient } from "https://cdn.jsdelivr.net/n
   const ROCKY_NOTIFY_SECRET = 'rockyNotifRahasia2026';
   const ROCKY_SERVER_REGISTER_TOKEN_URL = ROCKY_NOTIFY_WORKER_BASE_URL + '/register-server-token';
   const ROCKY_STAFF_NOTIFY_MANUAL_BONUS_URL = ROCKY_NOTIFY_WORKER_BASE_URL + '/notify-staff-manual-bonus';
+  const ROCKY_STAFF_NOTIFY_BONUS_WITHDRAWAL_URL = ROCKY_NOTIFY_WORKER_BASE_URL + '/notify-staff-bonus-withdrawal';
   const ROCKY_STAFF_NOTIFY_UNLOCK_REVIEW_URL = ROCKY_NOTIFY_WORKER_BASE_URL + '/notify-staff-unlock-review';
   const ROCKY_NOTIFY_TARGET_URL = ROCKY_NOTIFY_WORKER_BASE_URL + '/notify-target-achieved';
   // Web push Firebase tidak dipakai di mode Supabase. Untuk APK Android, token FCM native tetap bisa disimpan ke tabel adminDeviceTokens.
@@ -914,6 +915,49 @@ import { createClient as createSupabaseClient } from "https://cdn.jsdelivr.net/n
       reason: String(row.reason || row.note || ''),
       updatedByName: currentUser?.name || currentUser?.username || 'Server Rocky'
     }, 'Notif review buka fitur staff');
+  }
+  function notifyStaffBonusWithdrawalFromServer(row = {}, user = null, balance = {}) {
+    const username = sanitizeUsername(row.user || row.username || '');
+    const amount = bonusWithdrawalAmount(row);
+    if (!username || amount <= 0) return Promise.resolve(null);
+    const role = normalizeRole(row.userRole || row.role || user?.role || 'staff');
+    const daily = isDailyRole(role);
+    const earned = Number(row.bonusEarned ?? balance.earned ?? 0);
+    const withdrawnBefore = Number(row.withdrawnBefore ?? balance.withdrawn ?? 0);
+    const remainingBefore = Number(row.remainingBefore ?? balance.remaining ?? 0);
+    const withdrawnAfter = Number(row.withdrawnAfter ?? (withdrawnBefore + amount));
+    const remainingAfter = Number(row.remainingAfter ?? Math.max(0, remainingBefore - amount));
+    return notifyRockyWorker(ROCKY_STAFF_NOTIFY_BONUS_WITHDRAWAL_URL, {
+      targetUsername: username,
+      username,
+      user: username,
+      name: row.name || user?.name || username,
+      amount,
+      withdrawalAmount: amount,
+      paidAmount: amount,
+      bonusEarned: earned,
+      withdrawnBefore,
+      withdrawnAfter,
+      remainingBefore,
+      remainingAfter,
+      note: String(row.note || 'Ambil bonus sebagian'),
+      action: 'withdraw',
+      dateKey: String(row.dateKey || ''),
+      monthKey: String(row.monthKey || ''),
+      bonusId: String(row.id || row.docId || row.clientRequestId || ''),
+      type: BONUS_WITHDRAWAL_TYPE,
+      source: BONUS_WITHDRAWAL_TYPE,
+      role,
+      userRole: role,
+      actualRole: role,
+      bonusGroup: daily ? 'harian' : 'staff',
+      isDaily: daily,
+      dailyMode: daily,
+      actualDaily: daily,
+      canReceiveStaffNotifications: true,
+      notificationAudience: 'staff',
+      createdByName: currentUser?.name || currentUser?.username || 'Server Rocky'
+    }, 'Notif ambil bonus staff');
   }
   async function saveNativeAdminFcmToken(token, platform = 'android') {
     const cleanToken = String(token || '').trim();
@@ -3067,6 +3111,8 @@ Masukkan PIN admin:`);
       const now = nowDate();
       const nowMs = Date.now();
       const clientRequestId = `bw_${sanitizeUsername(currentUser.username)}_${nowMs}_${Math.random().toString(36).slice(2, 8)}`;
+      const withdrawnAfter = Number(balance.withdrawn || 0) + amount;
+      const remainingAfter = Math.max(0, Number(balance.remaining || 0) - amount);
       const payload = {
         user: username,
         name: user.name || username,
@@ -3076,6 +3122,11 @@ Masukkan PIN admin:`);
         amount: -amount,
         withdrawalAmount: amount,
         paidAmount: amount,
+        bonusEarned: Number(balance.earned || 0),
+        withdrawnBefore: Number(balance.withdrawn || 0),
+        withdrawnAfter,
+        remainingBefore: Number(balance.remaining || 0),
+        remainingAfter,
         note,
         monthKey,
         dateKey: toDateKey(now),
@@ -3097,6 +3148,7 @@ Masukkan PIN admin:`);
       const savedWithdrawal = { id: ref.id, ...payload };
       upsertManualBonusRecord(savedWithdrawal);
       await logAudit('bonus_withdrawal_add', { id: ref.id, user: username, name: user.name || username, role, amount, monthKey, note });
+      await notifyStaffBonusWithdrawalFromServer(savedWithdrawal, user, balance);
       const amountInput = $('bonus-withdrawal-amount');
       const noteInput = $('bonus-withdrawal-note');
       if (amountInput) { amountInput.value = ''; amountInput.setAttribute('data-numeric', '0'); }
