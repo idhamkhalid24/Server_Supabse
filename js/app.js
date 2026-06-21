@@ -1702,23 +1702,41 @@ import { createClient as createSupabaseClient } from "https://cdn.jsdelivr.net/n
     });
     return [...map.values()].sort((a, b) => String(b.effectiveDate || b.dateKey).localeCompare(String(a.effectiveDate || a.dateKey)));
   }
+  let serverTargetScheduleListExpanded = false;
+  window.toggleServerTargetScheduleList = function() {
+    serverTargetScheduleListExpanded = !serverTargetScheduleListExpanded;
+    if (typeof renderSettingsSummary === 'function' && document.getElementById('settings-summary')) {
+      renderSettingsSummary();
+    }
+  };
+
   function renderServerTargetScheduleList(options = {}) {
     const allRows = serverTargetScheduleRows();
     const rows = allRows.slice(0, Number(options.limit || 12));
     const showAddButton = options.showAddButton === true;
-    const addButton = showAddButton ? `<button onclick="openServerDailyTargetSettings()" class="btn btn-primary" style="padding:8px 10px;font-size:11px;white-space:nowrap"><i class="fas fa-plus"></i> Tambah</button>` : '';
+    const addButton = showAddButton ? `<button onclick="openServerDailyTargetSettings(); event.stopPropagation()" class="btn btn-primary" style="padding:8px 10px;font-size:11px;white-space:nowrap;margin-right:8px"><i class="fas fa-plus"></i> Tambah</button>` : '';
+    const open = serverTargetScheduleListExpanded;
+    
     const header = `
-      <div style="display:flex;align-items:center;justify-content:space-between;gap:10px;margin-bottom:${rows.length ? '8px' : '0'}">
-        <div style="min-width:0">
-          <p class="label-xs" style="margin:0">Jadwal Target Tersimpan</p>
+      <div onclick="toggleServerTargetScheduleList()" style="display:flex;align-items:center;justify-content:space-between;gap:10px;margin-bottom:${open && rows.length ? '12px' : '0'};cursor:pointer">
+        <div style="min-width:0;flex:1">
+          <p class="label-xs" style="margin:0;color:var(--text)">Jadwal Target Tersimpan</p>
           <p style="font-size:10px;color:var(--text-soft);margin-top:3px;line-height:1.3">${allRows.length ? `${allRows.length} jadwal target tersimpan` : 'Belum ada jadwal bertanggal'}</p>
         </div>
-        ${addButton}
+        <div style="display:flex;align-items:center;flex-shrink:0">
+          ${addButton}
+          <div style="width:28px;height:28px;border-radius:10px;background:var(--surface);border:1px solid var(--border);display:flex;align-items:center;justify-content:center;color:var(--text-soft)"><i class="fas ${open ? 'fa-chevron-up' : 'fa-chevron-down'}" style="font-size:11px"></i></div>
+        </div>
       </div>`;
-    if (!rows.length) {
-      return `<div style="background:var(--surface);border:1px solid var(--border);border-radius:13px;padding:12px 13px">${header}<p style="font-size:10.5px;color:var(--text-soft);margin-top:8px;line-height:1.35">Target yang disimpan dari popup Atur Target akan muncul di sini.</p></div>`;
+
+    if (!open) {
+      return `<div style="background:var(--surface);border:1px solid var(--border);border-radius:13px;padding:12px 13px">${header}</div>`;
     }
-    return `<div style="background:var(--surface);border:1px solid var(--border);border-radius:13px;padding:12px 13px">${header}<div style="display:grid;gap:7px">${rows.map((r) => {
+
+    if (!rows.length) {
+      return `<div style="background:var(--surface);border:1px solid rgba(91,143,255,.26);border-radius:13px;padding:12px 13px;box-shadow:0 10px 28px rgba(0,0,0,.16)">${header}<p style="font-size:10.5px;color:var(--text-soft);margin-top:8px;line-height:1.35;border-top:1px solid var(--border);padding-top:10px">Target yang disimpan dari popup Atur Target akan muncul di sini.</p></div>`;
+    }
+    return `<div style="background:var(--surface);border:1px solid rgba(91,143,255,.26);border-radius:13px;padding:12px 13px;box-shadow:0 10px 28px rgba(0,0,0,.16)">${header}<div style="display:grid;gap:7px;border-top:1px solid var(--border);padding-top:12px">${rows.map((r) => {
       const dk = serverNormalizeTargetDateKey(r.effectiveDate || r.dateKey, '');
       const rowId = String(r.id || serverTargetSettingDocId(dk)).replace(/[^a-zA-Z0-9_-]/g, '');
       return `<div style="display:flex;align-items:center;gap:8px;border:1px solid var(--border);border-radius:12px;padding:9px 10px;background:var(--bg2)">
@@ -1729,7 +1747,7 @@ import { createClient as createSupabaseClient } from "https://cdn.jsdelivr.net/n
         <button onclick="editServerTargetSchedule('${dk}')" class="btn" title="Edit target tanggal ini" style="width:34px;height:34px;min-height:34px;padding:0;border-radius:10px;flex-shrink:0"><i class="fas fa-pen"></i></button>
         <button onclick="deleteServerTargetSchedule('${dk}','${rowId}')" class="btn btn-danger" title="Hapus target tanggal ini" style="width:34px;height:34px;min-height:34px;padding:0;border-radius:10px;flex-shrink:0"><i class="fas fa-trash"></i></button>
       </div>`;
-    }).join('')}</div><p style="font-size:10.5px;color:var(--text-soft);margin-top:7px;line-height:1.35">Tanggal yang belum diset akan memakai target terakhir sebelumnya.</p></div>`;
+    }).join('')}</div><p style="font-size:10.5px;color:var(--text-soft);margin-top:9px;line-height:1.35;text-align:center">Tanggal yang belum diset akan memakai target terakhir sebelumnya.</p></div>`;
   }
   window.editServerTargetSchedule = async function(dk) {
     const safeDate = serverNormalizeTargetDateKey(dk, '');
