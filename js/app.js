@@ -261,18 +261,51 @@ import { createClient as createSupabaseClient } from "https://cdn.jsdelivr.net/n
     let needsClientWhere = filteredReq.applied < filteredReq.total;
     let needsClientOrder = !!orderedReq.order && !orderedReq.applied && !orderedReq.order.implicit;
     let fetchLimit = (needsClientWhere || needsClientOrder) ? Math.min(Math.max(hardLimit * 3, hardLimit), 5000) : hardLimit;
-    let { data, error } = await orderedReq.req.limit(fetchLimit);
-    if (error && orderedReq.applied) {
-      console.warn('Order Supabase server gagal, pakai urutan lokal:', error.message || error);
-      filteredReq = applySupabaseWhereFilters(supabase.from(collectionName).select('id,data'), constraints);
-      orderedReq = applySupabaseOrder(filteredReq.req, collectionName, constraints, false);
-      needsClientWhere = filteredReq.applied < filteredReq.total;
-      needsClientOrder = !!orderedReq.order && !orderedReq.applied && !orderedReq.order.implicit;
-      fetchLimit = (needsClientWhere || needsClientOrder) ? Math.min(Math.max(hardLimit * 3, hardLimit), 5000) : hardLimit;
-      const fallback = await orderedReq.req.limit(fetchLimit);
-      data = fallback.data;
-      error = fallback.error;
+    let allData = [];
+    let from = 0;
+    const pageSize = 1000;
+    let error = null;
+    let useFallback = false;
+
+    while (allData.length < fetchLimit) {
+      let to = Math.min(from + pageSize - 1, fetchLimit - 1);
+      let pageFilteredReq = applySupabaseWhereFilters(supabase.from(collectionName).select('id,data'), constraints);
+      let pageOrderedReq = applySupabaseOrder(pageFilteredReq.req, collectionName, constraints, !useFallback);
+      
+      let res = await pageOrderedReq.req.range(from, to);
+      
+      if (res.error && pageOrderedReq.applied && !useFallback) {
+        console.warn('Order Supabase server gagal, pakai urutan lokal:', res.error.message || res.error);
+        useFallback = true;
+        
+        let fbFilteredReq = applySupabaseWhereFilters(supabase.from(collectionName).select('id,data'), constraints);
+        let fbOrderedReq = applySupabaseOrder(fbFilteredReq.req, collectionName, constraints, false);
+        
+        needsClientWhere = fbFilteredReq.applied < fbFilteredReq.total;
+        needsClientOrder = !!fbOrderedReq.order && !fbOrderedReq.applied && !fbOrderedReq.order.implicit;
+        fetchLimit = (needsClientWhere || needsClientOrder) ? Math.min(Math.max(hardLimit * 3, hardLimit), 5000) : hardLimit;
+        
+        to = Math.min(from + pageSize - 1, fetchLimit - 1);
+        res = await fbOrderedReq.req.range(from, to);
+      }
+      
+      if (res.error) {
+        error = res.error;
+        break;
+      }
+      
+      if (res.data && res.data.length > 0) {
+        allData.push(...res.data);
+      }
+      
+      if (!res.data || res.data.length < (to - from + 1)) {
+        break;
+      }
+      
+      from += (to - from + 1);
     }
+    
+    let data = allData;
     if (error) throw error;
     let rows = (data || []).map(normalizeRow);
     constraints.filter((c) => c.kind === 'where').forEach((c) => { rows = rows.filter((row) => compareWhere(row, c)); });
@@ -2632,9 +2665,10 @@ import { createClient as createSupabaseClient } from "https://cdn.jsdelivr.net/n
   function calculateTransactionBonusForList(list = []) {
     const total = (list || []).reduce((sum, t) => {
       const rate = getTransactionBonusRateForRecord(t);
-      return sum + (Number(t.amount || 0) * rate);
+      const val = Math.round(Number(t.amount || 0) * rate);
+      return sum + val;
     }, 0);
-    return Math.round(total);
+    return total;
   }
   function calculateBonus(o) { return Math.round(Number(o || 0) * getTransactionBonusRate()); }
 
